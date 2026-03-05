@@ -1,0 +1,5 @@
+{
+  "name": "CalSync",
+  "description": "A professional scheduling and booking application with Google Calendar integration.",
+  "requestFramePermissions": []
+}

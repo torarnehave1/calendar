@@ -1,0 +1,886 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  Calendar as CalendarIcon, 
+  Settings as SettingsIcon, 
+  Clock, 
+  User, 
+  Mail, 
+  CheckCircle2, 
+  ChevronLeft, 
+  ChevronRight,
+  Globe,
+  Palette,
+  Link as LinkIcon,
+  ExternalLink,
+  Users,
+  Plus,
+  Trash2,
+  Edit2
+} from 'lucide-react';
+import { 
+  format, 
+  addMonths, 
+  subMonths, 
+  startOfMonth, 
+  endOfMonth, 
+  startOfWeek, 
+  endOfWeek, 
+  isSameMonth, 
+  isSameDay, 
+  addDays, 
+  eachDayOfInterval,
+  isBefore,
+  startOfDay,
+  parse,
+  addMinutes,
+  isWithinInterval
+} from 'date-fns';
+import { motion, AnimatePresence } from 'motion/react';
+import { cn } from './lib/utils';
+
+// --- Types ---
+
+interface Settings {
+  name: string;
+  bio: string;
+  primary_color: string;
+  availability_start: string;
+  availability_end: string;
+  timezone: string;
+}
+
+interface AvailabilityDay {
+  day_of_week: number;
+  is_available: number;
+}
+
+interface MeetingType {
+  id: number;
+  name: string;
+  duration: number;
+  description: string;
+  is_special?: number;
+}
+
+interface GroupMeeting {
+  id: number;
+  title: string;
+  start_time: string;
+  zoom_link: string;
+  description: string;
+  recurrence?: string;
+}
+
+interface Booking {
+  id: number;
+  guest_name: string;
+  guest_email: string;
+  start_time: string;
+  end_time: string;
+  description: string;
+  meeting_type_name?: string;
+}
+
+// --- Components ---
+
+const Button = ({ className, variant = 'primary', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'outline' }) => {
+  const variants = {
+    primary: 'bg-indigo-600 text-white hover:bg-indigo-700',
+    secondary: 'bg-slate-100 text-slate-900 hover:bg-slate-200',
+    outline: 'border border-slate-200 text-slate-600 hover:bg-slate-50'
+  };
+  return (
+    <button 
+      className={cn('px-4 py-2 rounded-lg font-medium transition-all active:scale-95 disabled:opacity-50', variants[variant], className)} 
+      {...props} 
+    />
+  );
+};
+
+const Input = ({ label, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label?: string }) => (
+  <div className="space-y-1">
+    {label && <label className="text-sm font-medium text-slate-700">{label}</label>}
+    <input 
+      className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" 
+      {...props} 
+    />
+  </div>
+);
+
+// --- Views ---
+
+const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings }: { settings: Settings, availability: AvailabilityDay[], meetingTypes: MeetingType[], groupMeetings: GroupMeeting[] }) => {
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selectedMeetingType, setSelectedMeetingType] = useState<MeetingType | null>(null);
+  const [selectedGroupMeeting, setSelectedGroupMeeting] = useState<GroupMeeting | null>(null);
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [selectedTime, setSelectedTime] = useState<string | null>(null);
+  const [bookingStep, setBookingStep] = useState<'type' | 'special_options' | 'calendar' | 'details' | 'success'>('type');
+  const [formData, setFormData] = useState({ name: '', email: '', note: '' });
+  const [specialMode, setSpecialMode] = useState<'invite' | 'group' | null>(null);
+
+  const days = eachDayOfInterval({
+    start: startOfWeek(startOfMonth(currentMonth)),
+    end: endOfWeek(endOfMonth(currentMonth))
+  });
+
+  const isDayAvailable = (date: Date) => {
+    const dayOfWeek = date.getDay();
+    const config = availability.find(a => a.day_of_week === dayOfWeek);
+    return config?.is_available === 1 && !isBefore(date, startOfDay(new Date()));
+  };
+
+  const getTimeSlots = () => {
+    if (!selectedDate || !selectedMeetingType) return [];
+    const slots = [];
+    let current = parse(settings.availability_start, 'HH:mm', selectedDate);
+    const end = parse(settings.availability_end, 'HH:mm', selectedDate);
+    
+    while (isBefore(current, end)) {
+      slots.push(format(current, 'HH:mm'));
+      current = addMinutes(current, 30); // Keep slots at 30 min intervals for simplicity, or adjust to duration
+    }
+    return slots;
+  };
+
+  const handleBooking = async () => {
+    if (selectedMeetingType?.is_special) {
+      if (specialMode === 'invite') {
+        const res = await fetch('/api/invitation-request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guest_email: formData.email })
+        });
+        if (res.ok) setBookingStep('success');
+      } else if (specialMode === 'group' && selectedGroupMeeting) {
+        const res = await fetch('/api/group-meetings/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            group_meeting_id: selectedGroupMeeting.id, 
+            guest_email: formData.email 
+          })
+        });
+        if (res.ok) setBookingStep('success');
+      }
+      return;
+    }
+
+    if (!selectedDate || !selectedTime || !selectedMeetingType) return;
+    
+    const startTime = parse(selectedTime, 'HH:mm', selectedDate);
+    const endTime = addMinutes(startTime, selectedMeetingType.duration);
+
+    const res = await fetch('/api/bookings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        guest_name: formData.name,
+        guest_email: formData.email,
+        start_time: startTime.toISOString(),
+        end_time: endTime.toISOString(),
+        description: formData.note,
+        meeting_type_id: selectedMeetingType.id
+      })
+    });
+
+    if (res.ok) setBookingStep('success');
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto p-4 md:p-8">
+      <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-100 flex flex-col md:flex-row min-h-[600px]">
+        {/* Sidebar */}
+        <div className="md:w-1/3 bg-slate-50 p-8 border-r border-slate-100">
+          <div className="w-16 h-16 rounded-full bg-indigo-100 flex items-center justify-center mb-6">
+            <User className="text-indigo-600 w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900 mb-2">{settings.name}</h1>
+          <p className="text-slate-600 mb-6">{settings.bio}</p>
+          
+          <div className="space-y-4">
+            {selectedMeetingType && (
+              <div className="flex items-center text-indigo-600 text-sm font-bold">
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                <span>{selectedMeetingType.name}</span>
+              </div>
+            )}
+            <div className="flex items-center text-slate-500 text-sm">
+              <Clock className="w-4 h-4 mr-2" />
+              <span>{selectedMeetingType ? `${selectedMeetingType.duration} min meeting` : 'Select duration'}</span>
+            </div>
+            <div className="flex items-center text-slate-500 text-sm">
+              <Globe className="w-4 h-4 mr-2" />
+              <span>{settings.timezone}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content */}
+        <div className="flex-1 p-8">
+          <AnimatePresence mode="wait">
+            {bookingStep === 'type' && (
+              <motion.div 
+                key="type"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-6"
+              >
+                <h2 className="text-2xl font-bold">Select Meeting Type</h2>
+                <div className="grid grid-cols-1 gap-4">
+                  {meetingTypes.map(type => (
+                    <button
+                      key={type.id}
+                      onClick={() => {
+                        setSelectedMeetingType(type);
+                        if (type.is_special) {
+                          setBookingStep('special_options');
+                        } else {
+                          setBookingStep('calendar');
+                        }
+                      }}
+                      className="p-6 border border-slate-100 rounded-2xl text-left hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
+                    >
+                      <div className="flex justify-between items-center mb-2">
+                        <h3 className="font-bold text-lg group-hover:text-indigo-600">{type.name}</h3>
+                        {!type.is_special && <span className="text-sm font-medium text-slate-500 bg-slate-100 px-2 py-1 rounded-md">{type.duration} min</span>}
+                        {type.is_special && <span className="text-sm font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded-md">Free</span>}
+                      </div>
+                      <p className="text-sm text-slate-500">{type.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+
+            {bookingStep === 'special_options' && (
+              <motion.div 
+                key="special"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-6"
+              >
+                <button onClick={() => setBookingStep('type')} className="text-indigo-600 text-sm font-medium flex items-center hover:underline mb-4">
+                  <ChevronLeft className="w-4 h-4 mr-1" /> Back to Meeting Types
+                </button>
+                <h2 className="text-2xl font-bold">Choose an Option</h2>
+                <div className="grid grid-cols-1 gap-4">
+                  <button
+                    onClick={() => {
+                      setSpecialMode('invite');
+                      setBookingStep('details');
+                    }}
+                    className="p-6 border border-slate-100 rounded-2xl text-left hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
+                  >
+                    <h3 className="font-bold text-lg group-hover:text-indigo-600">Request an Invitation</h3>
+                    <p className="text-sm text-slate-500">Just enter your email and we'll send you an invite to our next session.</p>
+                  </button>
+                  
+                  <div className="space-y-3">
+                    <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Join a Group Meeting</h3>
+                    {groupMeetings.map(meeting => (
+                      <button
+                        key={meeting.id}
+                        onClick={() => {
+                          setSpecialMode('group');
+                          setSelectedGroupMeeting(meeting);
+                          setBookingStep('details');
+                        }}
+                        className="w-full p-6 border border-slate-100 rounded-2xl text-left hover:border-indigo-600 hover:bg-indigo-50 transition-all group"
+                      >
+                        <div className="flex justify-between items-center mb-2">
+                          <h4 className="font-bold group-hover:text-indigo-600">{meeting.title}</h4>
+                          <span className="text-xs font-medium text-slate-500">{format(new Date(meeting.start_time), 'MMM d, HH:mm')}</span>
+                        </div>
+                        <p className="text-xs text-slate-500 line-clamp-1">{meeting.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {bookingStep === 'calendar' && (
+              <motion.div 
+                key="calendar"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+              >
+                <button onClick={() => setBookingStep('type')} className="text-indigo-600 text-sm font-medium flex items-center hover:underline mb-4">
+                  <ChevronLeft className="w-4 h-4 mr-1" /> Back to Meeting Types
+                </button>
+                <div className="flex items-center justify-between mb-8">
+                  <h2 className="text-xl font-semibold">Select a Date & Time</h2>
+                  <div className="flex gap-2">
+                    <button onClick={() => setCurrentMonth(subMonths(currentMonth, 1))} className="p-2 hover:bg-slate-100 rounded-full"><ChevronLeft className="w-5 h-5" /></button>
+                    <button onClick={() => setCurrentMonth(addMonths(currentMonth, 1))} className="p-2 hover:bg-slate-100 rounded-full"><ChevronRight className="w-5 h-5" /></button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-7 gap-2 mb-8">
+                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+                    <div key={d} className="text-center text-xs font-bold text-slate-400 uppercase py-2">{d}</div>
+                  ))}
+                  {days.map((day, idx) => {
+                    const available = isDayAvailable(day);
+                    const isSelected = selectedDate && isSameDay(day, selectedDate);
+                    return (
+                      <button
+                        key={idx}
+                        disabled={!available || !isSameMonth(day, currentMonth)}
+                        onClick={() => setSelectedDate(day)}
+                        className={cn(
+                          "h-12 rounded-lg flex items-center justify-center text-sm transition-all",
+                          !isSameMonth(day, currentMonth) && "opacity-0 pointer-events-none",
+                          available ? "hover:bg-indigo-50 text-slate-900" : "text-slate-300 cursor-not-allowed",
+                          isSelected && "bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200"
+                        )}
+                      >
+                        {format(day, 'd')}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {selectedDate && (
+                  <div className="space-y-4">
+                    <h3 className="font-medium text-slate-900">{format(selectedDate, 'EEEE, MMMM do')}</h3>
+                    <div className="grid grid-cols-3 gap-2">
+                      {getTimeSlots().map(time => (
+                        <button
+                          key={time}
+                          onClick={() => setSelectedTime(time)}
+                          className={cn(
+                            "py-3 border rounded-lg text-sm font-medium transition-all",
+                            selectedTime === time ? "bg-indigo-600 text-white border-indigo-600" : "border-indigo-100 text-indigo-600 hover:border-indigo-600"
+                          )}
+                        >
+                          {time}
+                        </button>
+                      ))}
+                    </div>
+                    {selectedTime && (
+                      <Button className="w-full mt-4" onClick={() => setBookingStep('details')}>Confirm Time</Button>
+                    )}
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {bookingStep === 'details' && (
+              <motion.div 
+                key="details"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-6"
+              >
+                <button onClick={() => selectedMeetingType?.is_special ? setBookingStep('special_options') : setBookingStep('calendar')} className="text-indigo-600 text-sm font-medium flex items-center hover:underline">
+                  <ChevronLeft className="w-4 h-4 mr-1" /> Back
+                </button>
+                <h2 className="text-2xl font-bold">
+                  {selectedMeetingType?.is_special ? 'Join Session' : 'Enter Details'}
+                </h2>
+                <div className="space-y-4">
+                  {(!selectedMeetingType?.is_special || specialMode === 'group') && (
+                    <Input 
+                      label="Name" 
+                      placeholder="John Doe" 
+                      value={formData.name} 
+                      onChange={e => setFormData({...formData, name: e.target.value})} 
+                    />
+                  )}
+                  <Input 
+                    label="Email" 
+                    type="email" 
+                    placeholder="john@example.com" 
+                    value={formData.email} 
+                    onChange={e => setFormData({...formData, email: e.target.value})} 
+                  />
+                  {!selectedMeetingType?.is_special && (
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium text-slate-700">Notes (Optional)</label>
+                      <textarea 
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                        placeholder="Anything you'd like to share?"
+                        value={formData.note}
+                        onChange={e => setFormData({...formData, note: e.target.value})}
+                      />
+                    </div>
+                  )}
+                  <Button className="w-full py-4 text-lg" onClick={handleBooking}>
+                    {selectedMeetingType?.is_special ? 'Get Invitation' : 'Schedule Event'}
+                  </Button>
+                </div>
+              </motion.div>
+            )}
+
+            {bookingStep === 'success' && (
+              <motion.div 
+                key="success"
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="text-center py-12"
+              >
+                <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <CheckCircle2 className="text-green-600 w-10 h-10" />
+                </div>
+                <h2 className="text-3xl font-bold mb-2">You're All Set!</h2>
+                <p className="text-slate-600 mb-8">
+                  {selectedMeetingType?.is_special 
+                    ? "Check your email for the invitation and Zoom details." 
+                    : "A calendar invitation has been sent to your email."}
+                </p>
+                {(!selectedMeetingType?.is_special || (specialMode === 'group' && selectedGroupMeeting)) && (
+                  <div className="bg-slate-50 rounded-xl p-6 text-left max-w-sm mx-auto">
+                    <div className="flex items-center gap-3 mb-4">
+                      <CalendarIcon className="text-slate-400 w-5 h-5" />
+                      <div>
+                        <p className="text-sm font-bold text-slate-900">
+                          {selectedMeetingType?.is_special 
+                            ? selectedGroupMeeting?.title 
+                            : format(selectedDate!, 'EEEE, MMMM do')}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {selectedMeetingType?.is_special 
+                            ? format(new Date(selectedGroupMeeting!.start_time), 'HH:mm') 
+                            : `${selectedTime} - ${format(addMinutes(parse(selectedTime!, 'HH:mm', selectedDate!), selectedMeetingType!.duration), 'HH:mm')}`}
+                        </p>
+                      </div>
+                    </div>
+                    {specialMode === 'group' && selectedGroupMeeting && (
+                      <div className="flex items-center gap-3 mb-4">
+                        <LinkIcon className="text-slate-400 w-5 h-5" />
+                        <a href={selectedGroupMeeting.zoom_link} target="_blank" className="text-xs text-indigo-600 hover:underline truncate">
+                          Join Zoom Meeting
+                        </a>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3">
+                      <Globe className="text-slate-400 w-5 h-5" />
+                      <p className="text-xs text-slate-500">{settings.timezone}</p>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AdminSettingsView = ({ 
+  settings, 
+  availability, 
+  onUpdateSettings, 
+  onUpdateAvailability 
+}: { 
+  settings: Settings, 
+  availability: AvailabilityDay[],
+  onUpdateSettings: (s: Settings) => void,
+  onUpdateAvailability: (a: AvailabilityDay[]) => void
+}) => {
+  const [localSettings, setLocalSettings] = useState(settings);
+  const [localAvailability, setLocalAvailability] = useState(availability);
+  const [isGoogleConnected, setIsGoogleConnected] = useState(false);
+  const [activeTab, setActiveTab] = useState<'profile' | 'availability' | 'integrations' | 'bookings' | 'group-meetings'>('profile');
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
+  const [editingGroupMeeting, setEditingGroupMeeting] = useState<Partial<GroupMeeting> | null>(null);
+
+  useEffect(() => {
+    fetch('/api/auth/status').then(r => r.json()).then(d => setIsGoogleConnected(d.connected));
+    fetch('/api/admin/bookings').then(r => r.json()).then(setBookings);
+    if (activeTab === 'group-meetings') {
+      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+    }
+  }, [activeTab]);
+
+  const saveGroupMeeting = async () => {
+    if (!editingGroupMeeting?.title || !editingGroupMeeting?.start_time || !editingGroupMeeting?.zoom_link) return;
+    const res = await fetch('/api/admin/group-meetings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(editingGroupMeeting)
+    });
+    if (res.ok) {
+      setEditingGroupMeeting(null);
+      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+    }
+  };
+
+  const deleteGroupMeeting = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this group meeting?')) return;
+    const res = await fetch(`/api/admin/group-meetings/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+    }
+  };
+
+  const handleConnectGoogle = async () => {
+    const res = await fetch('/api/auth/url');
+    const { url } = await res.json();
+    window.open(url, 'google_oauth', 'width=600,height=700');
+    
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        setIsGoogleConnected(true);
+        window.removeEventListener('message', handler);
+      }
+    };
+    window.addEventListener('message', handler);
+  };
+
+  const saveProfile = async () => {
+    await fetch('/api/admin/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(localSettings)
+    });
+    onUpdateSettings(localSettings);
+  };
+
+  const saveAvailability = async () => {
+    await fetch('/api/admin/availability', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days: localAvailability })
+    });
+    onUpdateAvailability(localAvailability);
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 md:p-8">
+      <div className="flex flex-col md:flex-row gap-8">
+        {/* Sidebar Nav */}
+        <div className="md:w-64 space-y-1">
+          <button 
+            onClick={() => setActiveTab('profile')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'profile' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <User className="w-5 h-5" /> Profile Settings
+          </button>
+          <button 
+            onClick={() => setActiveTab('availability')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'availability' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <Clock className="w-5 h-5" /> Availability
+          </button>
+          <button 
+            onClick={() => setActiveTab('integrations')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'integrations' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <LinkIcon className="w-5 h-5" /> Integrations
+          </button>
+          <button 
+            onClick={() => setActiveTab('bookings')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'bookings' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <CalendarIcon className="w-5 h-5" /> All Bookings
+          </button>
+          <button 
+            onClick={() => setActiveTab('group-meetings')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'group-meetings' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <Users className="w-5 h-5" /> Group Meetings
+          </button>
+        </div>
+
+        {/* Content Area */}
+        <div className="flex-1 bg-white rounded-2xl border border-slate-100 p-8 shadow-sm">
+          {activeTab === 'profile' && (
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold">Profile Settings</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <Input label="Display Name" value={localSettings.name} onChange={e => setLocalSettings({...localSettings, name: e.target.value})} />
+                <Input label="Timezone" value={localSettings.timezone} onChange={e => setLocalSettings({...localSettings, timezone: e.target.value})} />
+                <div className="md:col-span-2">
+                  <label className="text-sm font-medium text-slate-700">Bio / Description</label>
+                  <textarea 
+                    className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none min-h-[100px]"
+                    value={localSettings.bio}
+                    onChange={e => setLocalSettings({...localSettings, bio: e.target.value})}
+                  />
+                </div>
+                <div className="flex items-center gap-4">
+                  <Palette className="text-slate-400" />
+                  <Input type="color" label="Primary Color" className="h-10 w-20 p-1" value={localSettings.primary_color} onChange={e => setLocalSettings({...localSettings, primary_color: e.target.value})} />
+                </div>
+              </div>
+              <Button onClick={saveProfile}>Save Changes</Button>
+            </div>
+          )}
+
+          {activeTab === 'availability' && (
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold">Availability</h2>
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <Input type="time" label="Start Time" value={localSettings.availability_start} onChange={e => setLocalSettings({...localSettings, availability_start: e.target.value})} />
+                  <Input type="time" label="End Time" value={localSettings.availability_end} onChange={e => setLocalSettings({...localSettings, availability_end: e.target.value})} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-700">Available Days</label>
+                  <div className="grid grid-cols-7 gap-2">
+                    {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, idx) => {
+                      const isAvail = localAvailability.find(a => a.day_of_week === idx)?.is_available === 1;
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            const next = [...localAvailability];
+                            const item = next.find(a => a.day_of_week === idx);
+                            if (item) item.is_available = isAvail ? 0 : 1;
+                            setLocalAvailability(next);
+                          }}
+                          className={cn(
+                            "h-12 rounded-lg font-bold transition-all",
+                            isAvail ? "bg-indigo-600 text-white shadow-md" : "bg-slate-100 text-slate-400 hover:bg-slate-200"
+                          )}
+                        >
+                          {day}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <Button onClick={saveAvailability}>Save Availability</Button>
+            </div>
+          )}
+
+          {activeTab === 'integrations' && (
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold">Integrations</h2>
+              <div className="p-6 border border-slate-100 rounded-2xl flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center">
+                    <img src="https://www.gstatic.com/images/branding/product/1x/calendar_48dp.png" className="w-8 h-8" alt="Google Calendar" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold">Google Calendar</h3>
+                    <p className="text-sm text-slate-500">Sync bookings to your primary calendar</p>
+                  </div>
+                </div>
+                {isGoogleConnected ? (
+                  <div className="flex items-center gap-2 text-green-600 bg-green-50 px-3 py-1 rounded-full text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4" /> Connected
+                  </div>
+                ) : (
+                  <Button variant="outline" onClick={handleConnectGoogle} className="flex items-center gap-2">
+                    Connect <ExternalLink className="w-4 h-4" />
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'bookings' && (
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold">All Bookings</h2>
+              <div className="space-y-3">
+                {bookings.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400">No bookings yet.</div>
+                ) : (
+                  bookings.map(booking => (
+                    <div key={booking.id} className="p-4 border border-slate-100 rounded-xl flex items-center justify-between hover:bg-slate-50 transition-all">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600 font-bold">
+                          {booking.guest_name[0]}
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-900">{booking.guest_name}</p>
+                          <p className="text-xs text-slate-500">{booking.guest_email} • {booking.meeting_type_name}</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-slate-900">{format(new Date(booking.start_time), 'MMM d, yyyy')}</p>
+                        <p className="text-xs text-slate-500">{format(new Date(booking.start_time), 'HH:mm')} - {format(new Date(booking.end_time), 'HH:mm')}</p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'group-meetings' && (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold">Group Meetings</h2>
+                <Button onClick={() => setEditingGroupMeeting({ title: '', start_time: format(new Date(), "yyyy-MM-dd'T'HH:mm"), zoom_link: '', description: '' })} className="flex items-center gap-2">
+                  <Plus className="w-4 h-4" /> Add Meeting
+                </Button>
+              </div>
+
+              {editingGroupMeeting && (
+                <div className="p-6 border-2 border-indigo-100 rounded-2xl bg-indigo-50/30 space-y-4">
+                  <h3 className="font-bold text-indigo-900">{editingGroupMeeting.id ? 'Edit' : 'New'} Group Meeting</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Input 
+                      label="Title" 
+                      value={editingGroupMeeting.title} 
+                      onChange={e => setEditingGroupMeeting({...editingGroupMeeting, title: e.target.value})} 
+                    />
+                    <Input 
+                      label="Start Time" 
+                      type="datetime-local"
+                      value={editingGroupMeeting.start_time} 
+                      onChange={e => setEditingGroupMeeting({...editingGroupMeeting, start_time: e.target.value})} 
+                    />
+                    <Input 
+                      label="Zoom Link" 
+                      value={editingGroupMeeting.zoom_link} 
+                      onChange={e => setEditingGroupMeeting({...editingGroupMeeting, zoom_link: e.target.value})} 
+                    />
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium text-slate-700">Recurrence</label>
+                      <select 
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                        value={editingGroupMeeting.recurrence || 'None'}
+                        onChange={e => setEditingGroupMeeting({...editingGroupMeeting, recurrence: e.target.value})}
+                      >
+                        <option value="None">None</option>
+                        <option value="Weekly">Weekly</option>
+                        <option value="Bi-Weekly">Bi-Weekly</option>
+                        <option value="Monthly">Monthly</option>
+                      </select>
+                    </div>
+                    <div className="md:col-span-2">
+                      <Input 
+                        label="Description" 
+                        value={editingGroupMeeting.description} 
+                        onChange={e => setEditingGroupMeeting({...editingGroupMeeting, description: e.target.value})} 
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-3">
+                    <Button onClick={saveGroupMeeting}>Save Meeting</Button>
+                    <Button variant="outline" onClick={() => setEditingGroupMeeting(null)}>Cancel</Button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {groupMeetings.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400">No group meetings scheduled.</div>
+                ) : (
+                  groupMeetings.map(meeting => (
+                    <div key={meeting.id} className="p-4 border border-slate-100 rounded-xl flex items-center justify-between hover:bg-slate-50 transition-all">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600">
+                          <Users className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-900">{meeting.title}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs text-slate-500">{meeting.zoom_link}</p>
+                            {meeting.recurrence && meeting.recurrence !== 'None' && (
+                              <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                                {meeting.recurrence}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-6">
+                        <div className="text-right">
+                          <p className="text-sm font-medium text-slate-900">{format(new Date(meeting.start_time), 'MMM d, yyyy')}</p>
+                          <p className="text-xs text-slate-500">{format(new Date(meeting.start_time), 'HH:mm')}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => setEditingGroupMeeting(meeting)}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={() => deleteGroupMeeting(meeting.id)}
+                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default function App() {
+  const [view, setView] = useState<'public' | 'admin'>('public');
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [availability, setAvailability] = useState<AvailabilityDay[]>([]);
+  const [meetingTypes, setMeetingTypes] = useState<MeetingType[]>([]);
+  const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('/api/public/settings')
+      .then(r => r.json())
+      .then(data => {
+        setSettings(data.settings);
+        setAvailability(data.availability);
+        setMeetingTypes(data.meetingTypes);
+        setGroupMeetings(data.groupMeetings);
+        setLoading(false);
+      });
+  }, []);
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      <nav className="bg-white border-b border-slate-100 px-8 py-4 flex justify-between items-center sticky top-0 z-50">
+        <div className="flex items-center gap-2 font-bold text-xl text-indigo-600">
+          <CalendarIcon className="w-6 h-6" /> CalSync
+        </div>
+        <div className="flex gap-4">
+          <button 
+            onClick={() => setView('public')} 
+            className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'public' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
+          >
+            Public View
+          </button>
+          <button 
+            onClick={() => setView('admin')} 
+            className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'admin' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
+          >
+            <SettingsIcon className="w-4 h-4 inline mr-1" /> Admin
+          </button>
+        </div>
+      </nav>
+
+      <main className="py-12">
+        {view === 'public' ? (
+          <PublicBookingView 
+            settings={settings!} 
+            availability={availability} 
+            meetingTypes={meetingTypes} 
+            groupMeetings={groupMeetings}
+          />
+        ) : (
+          <AdminSettingsView 
+            settings={settings!} 
+            availability={availability} 
+            onUpdateSettings={setSettings}
+            onUpdateAvailability={setAvailability}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
