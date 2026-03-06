@@ -1,7 +1,15 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-const db = new Database('calendar.db');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const dbPath = path.resolve(process.cwd(), 'calendar.db');
+console.log("Database path:", dbPath);
+
+const db = new Database(dbPath);
+db.pragma('journal_mode = WAL');
 
 // Initialize tables
 db.exec(`
@@ -37,13 +45,6 @@ if (!hasIsSpecial) {
   db.exec("ALTER TABLE meeting_types ADD COLUMN is_special INTEGER DEFAULT 0");
 }
 
-// Migration: Add recurrence column to group_meetings if it doesn't exist
-const groupTableInfo = db.prepare("PRAGMA table_info(group_meetings)").all() as any[];
-const hasRecurrence = groupTableInfo.some(col => col.name === 'recurrence');
-if (!hasRecurrence) {
-  db.exec("ALTER TABLE group_meetings ADD COLUMN recurrence TEXT DEFAULT 'None'");
-}
-
 db.exec(`
   CREATE TABLE IF NOT EXISTS group_meetings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +75,17 @@ db.exec(`
     FOREIGN KEY (meeting_type_id) REFERENCES meeting_types(id)
   );
 `);
+
+// Migration: Add recurrence column to group_meetings if it doesn't exist
+const groupTableInfo = db.prepare("PRAGMA table_info(group_meetings)").all() as any[];
+const hasRecurrence = groupTableInfo.some(col => col.name === 'recurrence');
+if (!hasRecurrence) {
+  try {
+    db.exec("ALTER TABLE group_meetings ADD COLUMN recurrence TEXT DEFAULT 'None'");
+  } catch (e) {
+    console.log("Recurrence column already exists or table not ready");
+  }
+}
 
 // Seed default availability if empty
 const dayCount = db.prepare('SELECT COUNT(*) as count FROM availability_days').get() as { count: number };
@@ -113,7 +125,7 @@ for (const type of seedTypes) {
 // Seed group meetings if empty
 const groupMeetingsCount = db.prepare('SELECT COUNT(*) as count FROM group_meetings').get() as { count: number };
 if (groupMeetingsCount.count === 0) {
-  const insertGroupMeeting = db.prepare('INSERT INTO group_meetings (title, start_time, zoom_link, description) VALUES (?, ?, ?, ?)');
+  const insertGroupMeeting = db.prepare('INSERT INTO group_meetings (title, start_time, zoom_link, description, recurrence) VALUES (?, ?, ?, ?, ?)');
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   tomorrow.setHours(10, 0, 0, 0);

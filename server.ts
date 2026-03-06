@@ -6,14 +6,26 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+console.log("NODE_ENV:", process.env.NODE_ENV);
+
 const app = express();
 app.use(express.json());
 const PORT = 3000;
 
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
+});
+
+if (!process.env.APP_URL) {
+  console.warn("WARNING: APP_URL is not set. OAuth callbacks may fail.");
+} else {
+  console.log("APP_URL is set to:", process.env.APP_URL);
+}
+
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  `${process.env.APP_URL}/auth/callback`
+  process.env.APP_URL ? `${process.env.APP_URL}/auth/callback` : undefined
 );
 
 // --- API Routes ---
@@ -239,17 +251,24 @@ app.get("/api/auth/status", (req, res) => {
 });
 
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  }
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      console.log("Starting Vite in middleware mode...");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+      console.log("Vite middleware attached.");
+    }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
 }
 
 startServer();
