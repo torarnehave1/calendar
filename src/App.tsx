@@ -116,6 +116,13 @@ const Input = ({ label, ...props }: React.InputHTMLAttributes<HTMLInputElement> 
   </div>
 );
 
+// Helper: build headers for admin API calls (includes X-User-Email for auth)
+const adminHeaders = (email: string, contentType?: string): Record<string, string> => {
+  const h: Record<string, string> = { 'X-User-Email': email };
+  if (contentType) h['Content-Type'] = contentType;
+  return h;
+};
+
 // --- Views ---
 
 const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings, ownerEmail }: { settings: Settings, availability: AvailabilityDay[], meetingTypes: MeetingType[], groupMeetings: GroupMeeting[], ownerEmail: string }) => {
@@ -485,16 +492,18 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
   );
 };
 
-const AdminSettingsView = ({ 
-  settings, 
-  availability, 
-  onUpdateSettings, 
-  onUpdateAvailability 
-}: { 
-  settings: Settings, 
+const AdminSettingsView = ({
+  settings,
+  availability,
+  onUpdateSettings,
+  onUpdateAvailability,
+  userEmail
+}: {
+  settings: Settings,
   availability: AvailabilityDay[],
   onUpdateSettings: (s: Settings) => void,
-  onUpdateAvailability: (a: AvailabilityDay[]) => void
+  onUpdateAvailability: (a: AvailabilityDay[]) => void,
+  userEmail: string
 }) => {
   const [localSettings, setLocalSettings] = useState(settings);
   const [localAvailability, setLocalAvailability] = useState(availability);
@@ -504,11 +513,14 @@ const AdminSettingsView = ({
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
   const [editingGroupMeeting, setEditingGroupMeeting] = useState<Partial<GroupMeeting> | null>(null);
 
+  const authH = adminHeaders(userEmail);
+  const authHJson = adminHeaders(userEmail, 'application/json');
+
   useEffect(() => {
-    fetch('/api/auth/calendar-status').then(r => r.json()).then(d => setIsGoogleConnected(d.connected)).catch(() => {});
-    fetch('/api/admin/bookings').then(r => r.json()).then(d => setBookings(d.bookings || d)).catch(() => {});
+    fetch('/api/auth/calendar-status', { headers: authH }).then(r => r.json()).then(d => setIsGoogleConnected(d.connected)).catch(() => {});
+    fetch('/api/admin/bookings', { headers: authH }).then(r => r.json()).then(d => setBookings(d.bookings || d)).catch(() => {});
     if (activeTab === 'group-meetings') {
-      fetch('/api/admin/group-meetings').then(r => r.json()).then(d => setGroupMeetings(d.groupMeetings || d)).catch(() => {});
+      fetch('/api/admin/group-meetings', { headers: authH }).then(r => r.json()).then(d => setGroupMeetings(d.groupMeetings || d)).catch(() => {});
     }
   }, [activeTab]);
 
@@ -516,20 +528,20 @@ const AdminSettingsView = ({
     if (!editingGroupMeeting?.title || !editingGroupMeeting?.start_time || !editingGroupMeeting?.zoom_link) return;
     const res = await fetch('/api/admin/group-meetings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHJson,
       body: JSON.stringify(editingGroupMeeting)
     });
     if (res.ok) {
       setEditingGroupMeeting(null);
-      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+      fetch('/api/admin/group-meetings', { headers: authH }).then(r => r.json()).then(setGroupMeetings);
     }
   };
 
   const deleteGroupMeeting = async (id: number) => {
     if (!confirm('Are you sure you want to delete this group meeting?')) return;
-    const res = await fetch(`/api/admin/group-meetings?id=${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/admin/group-meetings?id=${id}`, { method: 'DELETE', headers: authH });
     if (res.ok) {
-      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+      fetch('/api/admin/group-meetings', { headers: authH }).then(r => r.json()).then(setGroupMeetings);
     }
   };
 
@@ -540,7 +552,7 @@ const AdminSettingsView = ({
   const saveProfile = async () => {
     await fetch('/api/admin/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHJson,
       body: JSON.stringify(localSettings)
     });
     onUpdateSettings(localSettings);
@@ -549,7 +561,7 @@ const AdminSettingsView = ({
   const saveAvailability = async () => {
     await fetch('/api/admin/availability', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHJson,
       body: JSON.stringify({ days: localAvailability })
     });
     onUpdateAvailability(localAvailability);
@@ -945,7 +957,7 @@ export default function App() {
   // Auto-setup defaults for new user on first login
   useEffect(() => {
     if (authStatus === 'authed' && authUser?.email && !settings) {
-      fetch('/api/admin/setup', { method: 'POST' })
+      fetch('/api/admin/setup', { method: 'POST', headers: { 'X-User-Email': authUser.email } })
         .then(() => fetch(`/api/public/settings?user=${encodeURIComponent(authUser.email)}`))
         .then(r => r.json())
         .then(data => {
@@ -1043,6 +1055,7 @@ export default function App() {
             availability={availability}
             onUpdateSettings={setSettings}
             onUpdateAvailability={setAvailability}
+            userEmail={authUser!.email}
           />
         ) : (
           <div className="text-center py-20 text-slate-500">
