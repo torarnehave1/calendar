@@ -134,6 +134,7 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
   const [bookingStep, setBookingStep] = useState<'type' | 'special_options' | 'calendar' | 'details' | 'success'>('type');
   const [formData, setFormData] = useState({ name: '', email: '', note: '' });
   const [specialMode, setSpecialMode] = useState<'invite' | 'group' | null>(null);
+  const [bookingError, setBookingError] = useState('');
 
   const days = eachDayOfInterval({
     start: startOfWeek(startOfMonth(currentMonth)),
@@ -160,6 +161,7 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
   };
 
   const handleBooking = async () => {
+    setBookingError('');
     if (selectedMeetingType?.is_special) {
       if (specialMode === 'invite') {
         const res = await fetch('/api/invitation-request', {
@@ -168,6 +170,7 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
           body: JSON.stringify({ guest_email: formData.email, owner_email: ownerEmail })
         });
         if (res.ok) setBookingStep('success');
+        else { const d = await res.json().catch(() => ({})); setBookingError(d.error || 'Failed to send invitation'); }
       } else if (specialMode === 'group' && selectedGroupMeeting) {
         const res = await fetch('/api/group-meetings/join', {
           method: 'POST',
@@ -179,12 +182,13 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
           })
         });
         if (res.ok) setBookingStep('success');
+        else { const d = await res.json().catch(() => ({})); setBookingError(d.error || 'Failed to join group meeting'); }
       }
       return;
     }
 
     if (!selectedDate || !selectedTime || !selectedMeetingType) return;
-    
+
     const startTime = parse(selectedTime, 'HH:mm', selectedDate);
     const endTime = addMinutes(startTime, selectedMeetingType.duration);
 
@@ -202,7 +206,12 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
       })
     });
 
-    if (res.ok) setBookingStep('success');
+    if (res.ok) {
+      setBookingStep('success');
+    } else {
+      const d = await res.json().catch(() => ({}));
+      setBookingError(d.error || 'Failed to create booking');
+    }
   };
 
   return (
@@ -432,6 +441,7 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
                   <Button className="w-full py-4 text-lg" onClick={handleBooking}>
                     {selectedMeetingType?.is_special ? 'Get Invitation' : 'Schedule Event'}
                   </Button>
+                  {bookingError && <p className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">{bookingError}</p>}
                 </div>
               </motion.div>
             )}

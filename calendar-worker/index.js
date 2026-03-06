@@ -143,6 +143,15 @@ export default {
           return json({ error: 'owner_email, guest_name, guest_email, start_time, end_time are required' }, 400)
         }
 
+        // Check for overlapping bookings
+        const conflict = await db.prepare(
+          `SELECT id FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?`
+        ).bind(owner_email, end_time, start_time).first()
+
+        if (conflict) {
+          return json({ error: 'This time slot is already booked. Please choose a different time.' }, 409)
+        }
+
         const result = await db.prepare(
           'INSERT INTO bookings (user_email, guest_name, guest_email, start_time, end_time, description, meeting_type_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
         ).bind(owner_email, guest_name, guest_email, start_time, end_time, description || '', meeting_type_id || null).run()
