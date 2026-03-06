@@ -37,6 +37,15 @@ import {
 } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
+import {
+  readStoredUser,
+  sendMagicLink as sendMagicLinkApi,
+  verifyMagicToken,
+  fetchUserContext,
+  setAuthCookie,
+  clearAuthCookie,
+  type AuthUser,
+} from './lib/auth';
 
 // --- Types ---
 
@@ -109,7 +118,7 @@ const Input = ({ label, ...props }: React.InputHTMLAttributes<HTMLInputElement> 
 
 // --- Views ---
 
-const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings }: { settings: Settings, availability: AvailabilityDay[], meetingTypes: MeetingType[], groupMeetings: GroupMeeting[] }) => {
+const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings, ownerEmail }: { settings: Settings, availability: AvailabilityDay[], meetingTypes: MeetingType[], groupMeetings: GroupMeeting[], ownerEmail: string }) => {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [selectedMeetingType, setSelectedMeetingType] = useState<MeetingType | null>(null);
   const [selectedGroupMeeting, setSelectedGroupMeeting] = useState<GroupMeeting | null>(null);
@@ -149,16 +158,17 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
         const res = await fetch('/api/invitation-request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ guest_email: formData.email })
+          body: JSON.stringify({ guest_email: formData.email, owner_email: ownerEmail })
         });
         if (res.ok) setBookingStep('success');
       } else if (specialMode === 'group' && selectedGroupMeeting) {
         const res = await fetch('/api/group-meetings/join', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            group_meeting_id: selectedGroupMeeting.id, 
-            guest_email: formData.email 
+          body: JSON.stringify({
+            group_meeting_id: selectedGroupMeeting.id,
+            guest_email: formData.email,
+            owner_email: ownerEmail
           })
         });
         if (res.ok) setBookingStep('success');
@@ -180,7 +190,8 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
         start_time: startTime.toISOString(),
         end_time: endTime.toISOString(),
         description: formData.note,
-        meeting_type_id: selectedMeetingType.id
+        meeting_type_id: selectedMeetingType.id,
+        owner_email: ownerEmail
       })
     });
 
@@ -494,10 +505,10 @@ const AdminSettingsView = ({
   const [editingGroupMeeting, setEditingGroupMeeting] = useState<Partial<GroupMeeting> | null>(null);
 
   useEffect(() => {
-    fetch('/api/auth/status').then(r => r.json()).then(d => setIsGoogleConnected(d.connected));
-    fetch('/api/admin/bookings').then(r => r.json()).then(setBookings);
+    fetch('/api/auth/calendar-status').then(r => r.json()).then(d => setIsGoogleConnected(d.connected)).catch(() => {});
+    fetch('/api/admin/bookings').then(r => r.json()).then(d => setBookings(d.bookings || d)).catch(() => {});
     if (activeTab === 'group-meetings') {
-      fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
+      fetch('/api/admin/group-meetings').then(r => r.json()).then(d => setGroupMeetings(d.groupMeetings || d)).catch(() => {});
     }
   }, [activeTab]);
 
@@ -516,24 +527,14 @@ const AdminSettingsView = ({
 
   const deleteGroupMeeting = async (id: number) => {
     if (!confirm('Are you sure you want to delete this group meeting?')) return;
-    const res = await fetch(`/api/admin/group-meetings/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/admin/group-meetings?id=${id}`, { method: 'DELETE' });
     if (res.ok) {
       fetch('/api/admin/group-meetings').then(r => r.json()).then(setGroupMeetings);
     }
   };
 
-  const handleConnectGoogle = async () => {
-    const res = await fetch('/api/auth/url');
-    const { url } = await res.json();
-    window.open(url, 'google_oauth', 'width=600,height=700');
-    
-    const handler = (e: MessageEvent) => {
-      if (e.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        setIsGoogleConnected(true);
-        window.removeEventListener('message', handler);
-      }
-    };
-    window.addEventListener('message', handler);
+  const handleConnectGoogle = () => {
+    window.location.href = 'https://auth.vegvisr.org/calendar/auth';
   };
 
   const saveProfile = async () => {
@@ -828,19 +829,138 @@ export default function App() {
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Auth state
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authStatus, setAuthStatus] = useState<'checking' | 'authed' | 'anonymous'>('checking');
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginStatus, setLoginStatus] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // Determine calendar owner email (from URL param or logged-in user)
+  const urlParams = new URLSearchParams(window.location.search);
+  const ownerEmail = urlParams.get('user') || authUser?.email || '';
+
+  // Persist user to localStorage
+  const persistUser = (user: { email: string; role?: string; user_id?: string | null; emailVerificationToken?: string | null }) => {
+    const payload = {
+      email: user.email,
+      role: user.role || 'user',
+      user_id: user.user_id || user.email,
+      oauth_id: user.user_id || user.email,
+      emailVerificationToken: user.emailVerificationToken || null,
+    };
+    localStorage.setItem('user', JSON.stringify(payload));
+    if (user.emailVerificationToken) setAuthCookie(user.emailVerificationToken);
+    sessionStorage.setItem('email_session_verified', '1');
+    setAuthUser({ userId: payload.user_id || '', email: payload.email, role: payload.role });
+    setAuthStatus('authed');
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('user');
+    sessionStorage.removeItem('email_session_verified');
+    clearAuthCookie();
+    setAuthUser(null);
+    setAuthStatus('anonymous');
+    setView('public');
+  };
+
+  const handleSendMagicLink = async () => {
+    if (!loginEmail.trim()) return;
+    setLoginError('');
+    setLoginStatus('');
+    setLoginLoading(true);
+    try {
+      const redirectUrl = `${window.location.origin}${window.location.pathname}`;
+      await sendMagicLinkApi(loginEmail.trim(), redirectUrl);
+      setLoginStatus('Magic link sent! Check your email.');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Failed to send magic link.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Bootstrap auth: check magic token in URL, then localStorage
   useEffect(() => {
-    fetch('/api/public/settings')
-      .then(r => r.json())
-      .then(data => {
-        setSettings(data.settings);
-        setAvailability(data.availability);
-        setMeetingTypes(data.meetingTypes);
-        setGroupMeetings(data.groupMeetings);
-        setLoading(false);
-      });
+    const url = new URL(window.location.href);
+    const magic = url.searchParams.get('magic');
+    if (magic) {
+      setAuthStatus('checking');
+      verifyMagicToken(magic)
+        .then(async (email) => {
+          try {
+            const ctx = await fetchUserContext(email);
+            persistUser(ctx);
+          } catch {
+            persistUser({ email, role: 'user', user_id: email });
+          }
+          url.searchParams.delete('magic');
+          window.history.replaceState({}, '', url.toString());
+        })
+        .catch(() => setAuthStatus('anonymous'));
+      return;
+    }
+
+    // Handle Google Calendar auth return
+    const calendarSuccess = url.searchParams.get('calendar_auth_success');
+    if (calendarSuccess) {
+      url.searchParams.delete('calendar_auth_success');
+      url.searchParams.delete('user_email');
+      window.history.replaceState({}, '', url.toString());
+    }
+
+    // Check localStorage
+    const stored = readStoredUser();
+    if (stored) {
+      setAuthUser(stored);
+      setAuthStatus('authed');
+    } else {
+      setAuthStatus('anonymous');
+    }
   }, []);
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  // Load public settings when owner email is known
+  useEffect(() => {
+    if (!ownerEmail) {
+      setLoading(false);
+      return;
+    }
+    fetch(`/api/public/settings?user=${encodeURIComponent(ownerEmail)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.settings) {
+          setSettings(data.settings);
+          setAvailability(data.availability || []);
+          setMeetingTypes(data.meetingTypes || []);
+          setGroupMeetings(data.groupMeetings || []);
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [ownerEmail]);
+
+  // Auto-setup defaults for new user on first login
+  useEffect(() => {
+    if (authStatus === 'authed' && authUser?.email && !settings) {
+      fetch('/api/admin/setup', { method: 'POST' })
+        .then(() => fetch(`/api/public/settings?user=${encodeURIComponent(authUser.email)}`))
+        .then(r => r.json())
+        .then(data => {
+          if (data.settings) {
+            setSettings(data.settings);
+            setAvailability(data.availability || []);
+            setMeetingTypes(data.meetingTypes || []);
+            setGroupMeetings(data.groupMeetings || []);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [authStatus, authUser?.email]);
+
+  if (authStatus === 'checking') return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -848,37 +968,86 @@ export default function App() {
         <div className="flex items-center gap-2 font-bold text-xl text-indigo-600">
           <CalendarIcon className="w-6 h-6" /> CalSync
         </div>
-        <div className="flex gap-4">
-          <button 
-            onClick={() => setView('public')} 
-            className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'public' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
-          >
-            Public View
-          </button>
-          <button 
-            onClick={() => setView('admin')} 
-            className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'admin' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
-          >
-            <SettingsIcon className="w-4 h-4 inline mr-1" /> Admin
-          </button>
+        <div className="flex items-center gap-4">
+          {authStatus === 'authed' && authUser ? (
+            <>
+              <span className="text-sm text-slate-500">{authUser.email}</span>
+              <button
+                onClick={() => setView('public')}
+                className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'public' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
+              >
+                Public View
+              </button>
+              <button
+                onClick={() => setView('admin')}
+                className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'admin' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
+              >
+                <SettingsIcon className="w-4 h-4 inline mr-1" /> Admin
+              </button>
+              <button onClick={handleLogout} className="px-3 py-2 text-sm text-slate-500 hover:text-red-600 transition-colors">
+                Log out
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setLoginOpen(true)}
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-all"
+            >
+              Sign in
+            </button>
+          )}
         </div>
       </nav>
 
+      {/* Magic link login modal */}
+      {loginOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[100]" onClick={() => setLoginOpen(false)}>
+          <div className="bg-white rounded-2xl p-8 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-xl font-bold text-slate-900 mb-4">Sign in with email</h2>
+            <div className="space-y-4">
+              <Input
+                label="Email address"
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail((e.target as HTMLInputElement).value)}
+                placeholder="you@example.com"
+              />
+              <Button onClick={handleSendMagicLink} disabled={loginLoading} className="w-full">
+                {loginLoading ? 'Sending...' : 'Send magic link'}
+              </Button>
+              {loginStatus && <p className="text-sm text-green-600">{loginStatus}</p>}
+              {loginError && <p className="text-sm text-red-600">{loginError}</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="py-12">
-        {view === 'public' ? (
-          <PublicBookingView 
-            settings={settings!} 
-            availability={availability} 
-            meetingTypes={meetingTypes} 
+        {loading ? (
+          <div className="flex items-center justify-center py-20">Loading...</div>
+        ) : !settings && !ownerEmail ? (
+          <div className="text-center py-20 text-slate-500">
+            <p className="text-lg">Sign in to set up your calendar, or visit a calendar via direct link.</p>
+          </div>
+        ) : view === 'public' && settings ? (
+          <PublicBookingView
+            settings={settings}
+            availability={availability}
+            meetingTypes={meetingTypes}
             groupMeetings={groupMeetings}
+            ownerEmail={ownerEmail}
           />
-        ) : (
-          <AdminSettingsView 
-            settings={settings!} 
-            availability={availability} 
+        ) : view === 'admin' && authStatus === 'authed' && settings ? (
+          <AdminSettingsView
+            settings={settings}
+            availability={availability}
             onUpdateSettings={setSettings}
             onUpdateAvailability={setAvailability}
           />
+        ) : (
+          <div className="text-center py-20 text-slate-500">
+            <p>Please sign in to access admin settings.</p>
+          </div>
         )}
       </main>
     </div>

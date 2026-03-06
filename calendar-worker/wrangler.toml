@@ -1,0 +1,13 @@
+name = "calendar-worker"
+main = "index.js"
+compatibility_date = "2025-01-15"
+account_id = "5d9b2060ef095c777711a8649c24914e"
+
+[[d1_databases]]
+binding = "CALENDAR_DB"
+database_name = "calendar_db"
+database_id = "ebdf13a5-f969-4048-8407-b4970805a4b2"
+
+[[services]]
+binding = "AUTH_WORKER"
+service = "auth-worker"
