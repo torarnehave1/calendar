@@ -135,6 +135,17 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
   const [formData, setFormData] = useState({ name: '', email: '', note: '' });
   const [specialMode, setSpecialMode] = useState<'invite' | 'group' | null>(null);
   const [bookingError, setBookingError] = useState('');
+  const [existingBookings, setExistingBookings] = useState<{start_time: string, end_time: string}[]>([]);
+
+  // Fetch existing bookings when a date is selected
+  useEffect(() => {
+    if (!selectedDate || !ownerEmail) { setExistingBookings([]); return; }
+    const dateStr = format(selectedDate, 'yyyy-MM-dd');
+    fetch(`/api/public/bookings?user=${encodeURIComponent(ownerEmail)}&date=${dateStr}`)
+      .then(r => r.json())
+      .then(d => setExistingBookings(d.bookings || []))
+      .catch(() => setExistingBookings([]));
+  }, [selectedDate, ownerEmail]);
 
   const days = eachDayOfInterval({
     start: startOfWeek(startOfMonth(currentMonth)),
@@ -149,13 +160,26 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
 
   const getTimeSlots = () => {
     if (!selectedDate || !selectedMeetingType) return [];
-    const slots = [];
+    const slots: string[] = [];
     let current = parse(settings.availability_start, 'HH:mm', selectedDate);
     const end = parse(settings.availability_end, 'HH:mm', selectedDate);
-    
+    const duration = selectedMeetingType.duration || 30;
+
     while (isBefore(current, end)) {
-      slots.push(format(current, 'HH:mm'));
-      current = addMinutes(current, 30); // Keep slots at 30 min intervals for simplicity, or adjust to duration
+      const slotStart = current;
+      const slotEnd = addMinutes(slotStart, duration);
+
+      // Check if this slot overlaps with any existing booking
+      const hasConflict = existingBookings.some(b => {
+        const bStart = new Date(b.start_time);
+        const bEnd = new Date(b.end_time);
+        return slotStart < bEnd && slotEnd > bStart;
+      });
+
+      if (!hasConflict) {
+        slots.push(format(current, 'HH:mm'));
+      }
+      current = addMinutes(current, 30);
     }
     return slots;
   };

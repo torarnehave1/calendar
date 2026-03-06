@@ -134,6 +134,22 @@ export default {
         })
       }
 
+      // ── Public: Get booked slots for a date ──
+      if (path === '/api/public/bookings' && request.method === 'GET') {
+        const userEmail = url.searchParams.get('user')
+        const date = url.searchParams.get('date') // YYYY-MM-DD
+        if (!userEmail || !date) return json({ error: 'user and date query params required' }, 400)
+
+        const dayStart = `${date}T00:00:00.000Z`
+        const dayEnd = `${date}T23:59:59.999Z`
+
+        const bookings = await db.prepare(
+          'SELECT start_time, end_time FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?'
+        ).bind(userEmail, dayEnd, dayStart).all()
+
+        return json({ bookings: bookings.results })
+      }
+
       // ── Public: Create booking ──
       if (path === '/api/bookings' && request.method === 'POST') {
         const body = await request.json()
