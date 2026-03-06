@@ -28,6 +28,32 @@ async function getCalendarToken(env, userEmail) {
   return data.access_token
 }
 
+async function fetchGoogleCalendarEvents(accessToken, timeMin, timeMax) {
+  try {
+    const params = new URLSearchParams({
+      timeMin,
+      timeMax,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+    })
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    )
+    if (!res.ok) {
+      console.error('Google Calendar fetch error:', await res.text())
+      return []
+    }
+    const data = await res.json()
+    return (data.items || [])
+      .filter(e => e.start?.dateTime && e.end?.dateTime) // skip all-day events
+      .map(e => ({ start_time: e.start.dateTime, end_time: e.end.dateTime, source: 'google' }))
+  } catch (err) {
+    console.error('Google Calendar fetch error:', err.message)
+    return []
+  }
+}
+
 async function createGoogleCalendarEvent(accessToken, event) {
   try {
     const res = await fetch(
@@ -134,7 +160,7 @@ export default {
         })
       }
 
-      // ── Public: Get booked slots for a date ──
+      // ── Public: Get booked slots for a date (D1 + Google Calendar) ──
       if (path === '/api/public/bookings' && request.method === 'GET') {
         const userEmail = url.searchParams.get('user')
         const date = url.searchParams.get('date') // YYYY-MM-DD
@@ -143,11 +169,25 @@ export default {
         const dayStart = `${date}T00:00:00.000Z`
         const dayEnd = `${date}T23:59:59.999Z`
 
-        const bookings = await db.prepare(
-          'SELECT start_time, end_time FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?'
-        ).bind(userEmail, dayEnd, dayStart).all()
+        // Fetch D1 bookings and Google Calendar events in parallel
+        const [d1Result, accessToken] = await Promise.all([
+          db.prepare(
+            'SELECT start_time, end_time FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?'
+          ).bind(userEmail, dayEnd, dayStart).all(),
+          getCalendarToken(env, userEmail),
+        ])
 
-        return json({ bookings: bookings.results })
+        const d1Bookings = (d1Result.results || []).map(b => ({ ...b, source: 'd1' }))
+
+        let googleEvents = []
+        if (accessToken) {
+          googleEvents = await fetchGoogleCalendarEvents(accessToken, dayStart, dayEnd)
+        }
+
+        // Merge and deduplicate (Google events that match D1 bookings by overlapping times are kept — frontend filters all)
+        const allBookings = [...d1Bookings, ...googleEvents]
+
+        return json({ bookings: allBookings })
       }
 
       // ── Public: Create booking ──

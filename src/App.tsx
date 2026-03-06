@@ -158,9 +158,9 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
     return config?.is_available === 1 && !isBefore(date, startOfDay(new Date()));
   };
 
-  const getTimeSlots = () => {
+  const getTimeSlots = (): { time: string; busy: boolean }[] => {
     if (!selectedDate || !selectedMeetingType) return [];
-    const slots: string[] = [];
+    const slots: { time: string; busy: boolean }[] = [];
     let current = parse(settings.availability_start, 'HH:mm', selectedDate);
     const end = parse(settings.availability_end, 'HH:mm', selectedDate);
     const duration = selectedMeetingType.duration || 30;
@@ -169,16 +169,13 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
       const slotStart = current;
       const slotEnd = addMinutes(slotStart, duration);
 
-      // Check if this slot overlaps with any existing booking
       const hasConflict = existingBookings.some(b => {
         const bStart = new Date(b.start_time);
         const bEnd = new Date(b.end_time);
         return slotStart < bEnd && slotEnd > bStart;
       });
 
-      if (!hasConflict) {
-        slots.push(format(current, 'HH:mm'));
-      }
+      slots.push({ time: format(current, 'HH:mm'), busy: hasConflict });
       current = addMinutes(current, 30);
     }
     return slots;
@@ -400,16 +397,21 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
                   <div className="space-y-4">
                     <h3 className="font-medium text-slate-900">{format(selectedDate, 'EEEE, MMMM do')}</h3>
                     <div className="grid grid-cols-3 gap-2">
-                      {getTimeSlots().map(time => (
+                      {getTimeSlots().map(slot => (
                         <button
-                          key={time}
-                          onClick={() => setSelectedTime(time)}
+                          key={slot.time}
+                          disabled={slot.busy}
+                          onClick={() => !slot.busy && setSelectedTime(slot.time)}
                           className={cn(
                             "py-3 border rounded-lg text-sm font-medium transition-all",
-                            selectedTime === time ? "bg-indigo-600 text-white border-indigo-600" : "border-indigo-100 text-indigo-600 hover:border-indigo-600"
+                            slot.busy
+                              ? "bg-red-50 text-red-400 border-red-200 cursor-not-allowed"
+                              : selectedTime === slot.time
+                                ? "bg-indigo-600 text-white border-indigo-600"
+                                : "border-indigo-100 text-indigo-600 hover:border-indigo-600"
                           )}
                         >
-                          {time}
+                          {slot.time}
                         </button>
                       ))}
                     </div>
