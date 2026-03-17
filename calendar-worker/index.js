@@ -5,7 +5,7 @@
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-User-Email',
 }
 
@@ -79,6 +79,50 @@ async function createGoogleCalendarEvent(accessToken, event) {
   }
 }
 
+async function updateGoogleCalendarEvent(accessToken, eventId, updates) {
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}?sendUpdates=all`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      }
+    )
+    if (!res.ok) {
+      console.error('Google Calendar update error:', await res.text())
+      return false
+    }
+    return true
+  } catch (err) {
+    console.error('Google Calendar update error:', err.message)
+    return false
+  }
+}
+
+async function deleteGoogleCalendarEvent(accessToken, eventId) {
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}?sendUpdates=all`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    )
+    if (!res.ok && res.status !== 410) {
+      console.error('Google Calendar delete error:', await res.text())
+      return false
+    }
+    return true
+  } catch (err) {
+    console.error('Google Calendar delete error:', err.message)
+    return false
+  }
+}
+
 // ── Seed default data for new user ──
 
 async function seedUserDefaults(db, userEmail) {
@@ -127,6 +171,537 @@ export default {
       // ── Health ──
       if (path === '/api/health') {
         return json({ status: 'ok', time: new Date().toISOString() })
+      }
+
+      // ── OpenAPI spec ──
+      if (path === '/openapi.json') {
+        return json({
+          openapi: '3.0.3',
+          info: {
+            title: 'Calendar Worker API',
+            version: '1.0.0',
+            description: 'API for the calendar booking app. Public endpoints require a user query param. Admin endpoints require an X-User-Email header.',
+          },
+          servers: [{ url: '/' }],
+          paths: {
+            '/api/health': {
+              get: {
+                summary: 'Health check',
+                operationId: 'getHealth',
+                tags: ['Health'],
+                responses: {
+                  '200': {
+                    description: 'Worker is healthy',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        status: { type: 'string', example: 'ok' },
+                        time: { type: 'string', format: 'date-time' },
+                      },
+                    } } },
+                  },
+                },
+              },
+            },
+            '/api/public/settings': {
+              get: {
+                summary: 'Get public settings, availability, meeting types, and group meetings for a user',
+                operationId: 'getPublicSettings',
+                tags: ['Public'],
+                parameters: [
+                  { name: 'user', in: 'query', required: true, schema: { type: 'string' }, description: 'Owner email address' },
+                ],
+                responses: {
+                  '200': {
+                    description: 'User settings and availability',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        settings: {
+                          type: 'object',
+                          properties: {
+                            name: { type: 'string' },
+                            bio: { type: 'string' },
+                            primary_color: { type: 'string' },
+                            availability_start: { type: 'string' },
+                            availability_end: { type: 'string' },
+                            timezone: { type: 'string' },
+                          },
+                        },
+                        availability: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              day_of_week: { type: 'integer', minimum: 0, maximum: 6 },
+                              is_available: { type: 'integer', enum: [0, 1] },
+                            },
+                          },
+                        },
+                        meetingTypes: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              id: { type: 'integer' },
+                              name: { type: 'string' },
+                              duration: { type: 'integer' },
+                              description: { type: 'string' },
+                              is_special: { type: 'integer', enum: [0, 1] },
+                            },
+                          },
+                        },
+                        groupMeetings: {
+                          type: 'array',
+                          items: { $ref: '#/components/schemas/GroupMeeting' },
+                        },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '404': { description: 'User not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+                },
+              },
+            },
+            '/api/public/bookings': {
+              get: {
+                summary: 'Get booked slots for a user on a given date (D1 + Google Calendar)',
+                operationId: 'getPublicBookings',
+                tags: ['Public'],
+                parameters: [
+                  { name: 'user', in: 'query', required: true, schema: { type: 'string' }, description: 'Owner email address' },
+                  { name: 'date', in: 'query', required: true, schema: { type: 'string', format: 'date' }, description: 'Date in YYYY-MM-DD format' },
+                ],
+                responses: {
+                  '200': {
+                    description: 'List of booked time slots',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        bookings: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              start_time: { type: 'string', format: 'date-time' },
+                              end_time: { type: 'string', format: 'date-time' },
+                              source: { type: 'string', enum: ['d1', 'google'] },
+                            },
+                          },
+                        },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                },
+              },
+            },
+            '/api/bookings': {
+              post: {
+                summary: 'Create a new booking (public)',
+                operationId: 'createBooking',
+                tags: ['Public'],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['owner_email', 'guest_name', 'guest_email', 'start_time', 'end_time'],
+                    properties: {
+                      owner_email: { type: 'string', description: 'Calendar owner email' },
+                      guest_name: { type: 'string' },
+                      guest_email: { type: 'string' },
+                      start_time: { type: 'string', format: 'date-time' },
+                      end_time: { type: 'string', format: 'date-time' },
+                      description: { type: 'string' },
+                      meeting_type_id: { type: 'integer', nullable: true },
+                    },
+                  } } },
+                },
+                responses: {
+                  '201': {
+                    description: 'Booking created',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        success: { type: 'boolean' },
+                        bookingId: { type: 'integer' },
+                        google_synced: { type: 'boolean' },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '409': { description: 'Time slot conflict', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+                },
+              },
+            },
+            '/api/group-meetings/join': {
+              post: {
+                summary: 'Join a group meeting as a guest',
+                operationId: 'joinGroupMeeting',
+                tags: ['Public'],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['group_meeting_id', 'guest_email'],
+                    properties: {
+                      group_meeting_id: { type: 'integer' },
+                      guest_email: { type: 'string' },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': { description: 'Joined successfully', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                },
+              },
+            },
+            '/api/invitation-request': {
+              post: {
+                summary: 'Request an information session invitation',
+                operationId: 'requestInvitation',
+                tags: ['Public'],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['guest_email', 'owner_email'],
+                    properties: {
+                      guest_email: { type: 'string' },
+                      owner_email: { type: 'string' },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': { description: 'Invitation sent', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                },
+              },
+            },
+            '/api/admin/setup': {
+              post: {
+                summary: 'Seed default settings, availability, and meeting types for the authenticated user',
+                operationId: 'adminSetup',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                responses: {
+                  '200': {
+                    description: 'Defaults seeded',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        success: { type: 'boolean' },
+                        message: { type: 'string' },
+                      },
+                    } } },
+                  },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+            '/api/admin/bookings': {
+              get: {
+                summary: 'List all bookings for the authenticated user',
+                operationId: 'adminGetBookings',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                responses: {
+                  '200': {
+                    description: 'List of bookings',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        bookings: {
+                          type: 'array',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              id: { type: 'integer' },
+                              guest_name: { type: 'string' },
+                              guest_email: { type: 'string' },
+                              start_time: { type: 'string', format: 'date-time' },
+                              end_time: { type: 'string', format: 'date-time' },
+                              description: { type: 'string' },
+                              google_event_id: { type: 'string', nullable: true },
+                              created_at: { type: 'string', format: 'date-time' },
+                              meeting_type_name: { type: 'string', nullable: true },
+                              meeting_type_duration: { type: 'integer', nullable: true },
+                            },
+                          },
+                        },
+                      },
+                    } } },
+                  },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+              patch: {
+                summary: 'Reschedule a booking',
+                operationId: 'adminRescheduleBooking',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['id', 'start_time', 'end_time'],
+                    properties: {
+                      id: { type: 'integer' },
+                      start_time: { type: 'string', format: 'date-time' },
+                      end_time: { type: 'string', format: 'date-time' },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': {
+                    description: 'Booking rescheduled',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        success: { type: 'boolean' },
+                        bookingId: { type: 'integer' },
+                        google_updated: { type: 'boolean' },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                  '404': { description: 'Booking not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+                  '409': { description: 'Time slot conflict', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+                },
+              },
+              delete: {
+                summary: 'Cancel and delete a booking',
+                operationId: 'adminDeleteBooking',
+                tags: ['Admin'],
+                parameters: [
+                  { $ref: '#/components/parameters/XUserEmail' },
+                  { name: 'id', in: 'query', required: true, schema: { type: 'integer' }, description: 'Booking ID to delete' },
+                ],
+                responses: {
+                  '200': {
+                    description: 'Booking deleted',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        success: { type: 'boolean' },
+                        google_deleted: { type: 'boolean' },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                  '404': { description: 'Booking not found', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+                },
+              },
+            },
+            '/api/admin/settings': {
+              post: {
+                summary: 'Update user settings (name, bio, colors, availability window, timezone)',
+                operationId: 'adminUpdateSettings',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string' },
+                      bio: { type: 'string' },
+                      primary_color: { type: 'string' },
+                      availability_start: { type: 'string', description: 'HH:MM format' },
+                      availability_end: { type: 'string', description: 'HH:MM format' },
+                      timezone: { type: 'string', description: 'IANA timezone, e.g. Europe/Oslo' },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': { description: 'Settings updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+            '/api/admin/availability': {
+              post: {
+                summary: 'Update weekly availability days',
+                operationId: 'adminUpdateAvailability',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['days'],
+                    properties: {
+                      days: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          required: ['day_of_week', 'is_available'],
+                          properties: {
+                            day_of_week: { type: 'integer', minimum: 0, maximum: 6, description: '0=Sunday, 6=Saturday' },
+                            is_available: { type: 'integer', enum: [0, 1] },
+                          },
+                        },
+                      },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': { description: 'Availability updated', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+            '/api/admin/group-meetings': {
+              get: {
+                summary: 'List all group meetings for the authenticated user',
+                operationId: 'adminGetGroupMeetings',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                responses: {
+                  '200': {
+                    description: 'List of group meetings',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        groupMeetings: {
+                          type: 'array',
+                          items: { $ref: '#/components/schemas/GroupMeeting' },
+                        },
+                      },
+                    } } },
+                  },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+              post: {
+                summary: 'Create or update a group meeting',
+                operationId: 'adminUpsertGroupMeeting',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                requestBody: {
+                  required: true,
+                  content: { 'application/json': { schema: {
+                    type: 'object',
+                    required: ['title', 'start_time', 'zoom_link'],
+                    properties: {
+                      id: { type: 'integer', nullable: true, description: 'If provided, updates existing meeting; otherwise creates new' },
+                      title: { type: 'string' },
+                      start_time: { type: 'string', format: 'date-time' },
+                      zoom_link: { type: 'string', format: 'uri' },
+                      description: { type: 'string' },
+                      recurrence: { type: 'string', enum: ['None', 'Weekly', 'Biweekly', 'Monthly'], default: 'None' },
+                    },
+                  } } },
+                },
+                responses: {
+                  '200': { description: 'Group meeting saved', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+              delete: {
+                summary: 'Delete a group meeting',
+                operationId: 'adminDeleteGroupMeeting',
+                tags: ['Admin'],
+                parameters: [
+                  { $ref: '#/components/parameters/XUserEmail' },
+                  { name: 'id', in: 'query', required: true, schema: { type: 'integer' }, description: 'Group meeting ID' },
+                ],
+                responses: {
+                  '200': { description: 'Group meeting deleted', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+            '/api/auth/calendar-status': {
+              get: {
+                summary: 'Check if Google Calendar is connected',
+                operationId: 'getCalendarStatus',
+                tags: ['Auth'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                responses: {
+                  '200': {
+                    description: 'Connection status',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        connected: { type: 'boolean' },
+                      },
+                    } } },
+                  },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+            '/api/auth/calendar-disconnect': {
+              post: {
+                summary: 'Disconnect Google Calendar integration',
+                operationId: 'disconnectCalendar',
+                tags: ['Auth'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                responses: {
+                  '200': { description: 'Calendar disconnected', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
+          },
+          components: {
+            parameters: {
+              XUserEmail: {
+                name: 'X-User-Email',
+                in: 'header',
+                required: true,
+                schema: { type: 'string', format: 'email' },
+                description: 'Authenticated user email address',
+              },
+            },
+            schemas: {
+              Error: {
+                type: 'object',
+                properties: {
+                  error: { type: 'string' },
+                },
+              },
+              Success: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean', example: true },
+                },
+              },
+              GroupMeeting: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  title: { type: 'string' },
+                  start_time: { type: 'string', format: 'date-time' },
+                  zoom_link: { type: 'string' },
+                  description: { type: 'string' },
+                  recurrence: { type: 'string' },
+                },
+              },
+            },
+            responses: {
+              BadRequest: {
+                description: 'Bad request — missing or invalid parameters',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+              },
+              Unauthorized: {
+                description: 'Unauthorized — missing X-User-Email header',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+              },
+            },
+          },
+          tags: [
+            { name: 'Health', description: 'Health check' },
+            { name: 'Public', description: 'Public booking endpoints (no auth required)' },
+            { name: 'Admin', description: 'Admin endpoints (X-User-Email header required)' },
+            { name: 'Auth', description: 'Google Calendar auth management' },
+          ],
+        })
       }
 
       // ── Public: Get settings + availability + meeting types + group meetings ──
@@ -391,6 +966,80 @@ export default {
           .bind(id, userEmail).run()
 
         return json({ success: true })
+      }
+
+      // ── Admin: Reschedule booking ──
+      if (path === '/api/admin/bookings' && request.method === 'PATCH') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const body = await request.json()
+        const { id, start_time, end_time } = body
+
+        if (!id || !start_time || !end_time) {
+          return json({ error: 'id, start_time, and end_time are required' }, 400)
+        }
+
+        // Verify booking belongs to this user
+        const booking = await db.prepare(
+          'SELECT id, google_event_id, guest_name, guest_email FROM bookings WHERE id = ? AND user_email = ?'
+        ).bind(id, userEmail).first()
+
+        if (!booking) return json({ error: 'Booking not found' }, 404)
+
+        // Check for conflicts at the new time (exclude the booking being rescheduled)
+        const conflict = await db.prepare(
+          'SELECT id FROM bookings WHERE user_email = ? AND id != ? AND start_time < ? AND end_time > ?'
+        ).bind(userEmail, id, end_time, start_time).first()
+
+        if (conflict) {
+          return json({ error: 'The new time slot conflicts with an existing booking.' }, 409)
+        }
+
+        // Update D1
+        await db.prepare(
+          'UPDATE bookings SET start_time = ?, end_time = ? WHERE id = ?'
+        ).bind(start_time, end_time, id).run()
+
+        // Update Google Calendar event if synced
+        let googleUpdated = false
+        if (booking.google_event_id) {
+          const accessToken = await getCalendarToken(env, userEmail)
+          if (accessToken) {
+            googleUpdated = await updateGoogleCalendarEvent(accessToken, booking.google_event_id, {
+              start: { dateTime: start_time },
+              end: { dateTime: end_time },
+            })
+          }
+        }
+
+        return json({ success: true, bookingId: id, google_updated: googleUpdated })
+      }
+
+      // ── Admin: Delete/cancel booking ──
+      if (path === '/api/admin/bookings' && request.method === 'DELETE') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const id = url.searchParams.get('id')
+        if (!id) return json({ error: 'id query param required' }, 400)
+
+        // Get booking details for Google Calendar cleanup
+        const booking = await db.prepare(
+          'SELECT id, google_event_id FROM bookings WHERE id = ? AND user_email = ?'
+        ).bind(id, userEmail).first()
+
+        if (!booking) return json({ error: 'Booking not found' }, 404)
+
+        // Delete from D1
+        await db.prepare('DELETE FROM bookings WHERE id = ?').bind(id).run()
+
+        // Delete from Google Calendar if synced
+        let googleDeleted = false
+        if (booking.google_event_id) {
+          const accessToken = await getCalendarToken(env, userEmail)
+          if (accessToken) {
+            googleDeleted = await deleteGoogleCalendarEvent(accessToken, booking.google_event_id)
+          }
+        }
+
+        return json({ success: true, google_deleted: googleDeleted })
       }
 
       // ── Admin: Calendar connection status ──
