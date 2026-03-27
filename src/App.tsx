@@ -40,6 +40,7 @@ import {
 } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from './lib/utils';
+import { EcosystemNav } from 'vegvisr-ui-kit';
 import {
   readStoredUser,
   sendMagicLink as sendMagicLinkApi,
@@ -1504,6 +1505,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      <div className="bg-slate-900 px-4 py-1.5">
+        <EcosystemNav showRecorder={false} className="max-w-7xl mx-auto" />
+      </div>
       <nav className="bg-white border-b border-slate-100 px-8 py-4 flex justify-between items-center sticky top-0 z-50">
         <div className="flex items-center gap-2 font-bold text-xl text-indigo-600">
           <CalendarIcon className="w-6 h-6" /> CalSync
