@@ -103,6 +103,46 @@ async function updateGoogleCalendarEvent(accessToken, eventId, updates) {
   }
 }
 
+// Returns rich event details for admin view (includes summary, attendees, gcal id)
+async function fetchGoogleCalendarEventsDetailed(accessToken, timeMin, timeMax) {
+  try {
+    const params = new URLSearchParams({
+      timeMin,
+      timeMax,
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '200',
+    })
+    const res = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    )
+    if (!res.ok) {
+      console.error('Google Calendar detailed fetch error:', await res.text())
+      return []
+    }
+    const data = await res.json()
+    return (data.items || [])
+      .filter(e => e.start?.dateTime && e.end?.dateTime)
+      .map(e => ({
+        id: null,
+        google_event_id: e.id,
+        guest_name: e.summary || '(No title)',
+        guest_email: (e.attendees || []).filter(a => !a.self).map(a => a.email).join(', '),
+        start_time: e.start.dateTime,
+        end_time: e.end.dateTime,
+        description: e.description || '',
+        meeting_type_name: null,
+        meeting_type_duration: null,
+        created_at: e.created,
+        source: 'google',
+      }))
+  } catch (err) {
+    console.error('Google Calendar detailed fetch error:', err.message)
+    return []
+  }
+}
+
 async function deleteGoogleCalendarEvent(accessToken, eventId) {
   try {
     const res = await fetch(
@@ -885,16 +925,36 @@ export default {
         return json({ success: true, message: 'Defaults seeded' })
       }
 
-      // ── Admin: Get bookings ──
+      // ── Admin: Get bookings (D1 + Google Calendar) ──
       if (path === '/api/admin/bookings' && request.method === 'GET') {
         if (!userEmail) return json({ error: 'Unauthorized' }, 401)
-        const bookings = await db.prepare(
+        const result = await db.prepare(
           `SELECT b.id, b.guest_name, b.guest_email, b.start_time, b.end_time, b.description, b.google_event_id, b.created_at,
                   mt.name as meeting_type_name, mt.duration as meeting_type_duration
            FROM bookings b LEFT JOIN meeting_types mt ON b.meeting_type_id = mt.id
            WHERE b.user_email = ? ORDER BY b.start_time ASC`
         ).bind(userEmail).all()
-        return json({ bookings: bookings.results })
+
+        const d1Bookings = (result.results || []).map(b => ({ ...b, source: 'app' }))
+        const syncedGoogleIds = new Set(d1Bookings.filter(b => b.google_event_id).map(b => b.google_event_id))
+
+        // Fetch Google Calendar events: 30 days back → 60 days forward
+        const accessToken = await getCalendarToken(env, userEmail)
+        let googleNativeEvents = []
+        if (accessToken) {
+          const timeMin = new Date()
+          timeMin.setDate(timeMin.getDate() - 30)
+          const timeMax = new Date()
+          timeMax.setDate(timeMax.getDate() + 60)
+          const allGoogleEvents = await fetchGoogleCalendarEventsDetailed(accessToken, timeMin.toISOString(), timeMax.toISOString())
+          // Exclude events already tracked in D1 via google_event_id
+          googleNativeEvents = allGoogleEvents.filter(e => !syncedGoogleIds.has(e.google_event_id))
+        }
+
+        const combined = [...d1Bookings, ...googleNativeEvents]
+          .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+
+        return json({ bookings: combined })
       }
 
       // ── Admin: Update settings ──

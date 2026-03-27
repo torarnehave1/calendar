@@ -81,13 +81,15 @@ interface GroupMeeting {
 }
 
 interface Booking {
-  id: number;
+  id: number | null;
   guest_name: string;
   guest_email: string;
   start_time: string;
   end_time: string;
   description: string;
   meeting_type_name?: string;
+  source?: 'app' | 'google';
+  google_event_id?: string;
 }
 
 // --- Components ---
@@ -737,14 +739,27 @@ const AdminSettingsView = ({
                   <div className="text-center py-12 text-slate-400">No bookings yet.</div>
                 ) : (
                   bookings.map(booking => (
-                    <div key={booking.id} className="p-4 border border-slate-100 rounded-xl flex items-center justify-between hover:bg-slate-50 transition-all">
+                    <div key={booking.id ?? booking.google_event_id} className="p-4 border border-slate-100 rounded-xl flex items-center justify-between hover:bg-slate-50 transition-all">
                       <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center text-indigo-600 font-bold">
-                          {booking.guest_name[0]}
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
+                          booking.source === 'google' ? 'bg-blue-50 text-blue-600' : 'bg-indigo-50 text-indigo-600'
+                        }`}>
+                          {(booking.guest_name || '?')[0].toUpperCase()}
                         </div>
                         <div>
-                          <p className="font-bold text-slate-900">{booking.guest_name}</p>
-                          <p className="text-xs text-slate-500">{booking.guest_email} • {booking.meeting_type_name}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="font-bold text-slate-900">{booking.guest_name}</p>
+                            {booking.source === 'google' && (
+                              <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                <img src="https://www.gstatic.com/images/branding/product/1x/calendar_48dp.png" className="w-3 h-3" alt="" />
+                                Google
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            {booking.guest_email}
+                            {booking.meeting_type_name ? ` • ${booking.meeting_type_name}` : ''}
+                          </p>
                         </div>
                       </div>
                       <div className="text-right">
