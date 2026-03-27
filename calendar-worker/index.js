@@ -163,6 +163,76 @@ async function deleteGoogleCalendarEvent(accessToken, eventId) {
   }
 }
 
+// ── Fetch all calendars the user has access to ──
+async function fetchCalendarList(accessToken) {
+  try {
+    const res = await fetch(
+      'https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=50',
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.items || []).map(c => ({
+      id: c.id,
+      summary: c.summary,
+      backgroundColor: c.backgroundColor || '#4f6df5',
+      foregroundColor: c.foregroundColor || '#ffffff',
+      accessRole: c.accessRole,
+      primary: c.primary || false,
+    }))
+  } catch (err) {
+    console.error('calendarList error:', err.message)
+    return []
+  }
+}
+
+// ── Fetch events from all calendars for a day range ──
+async function fetchAllCalendarEvents(accessToken, timeMin, timeMax) {
+  const calendars = await fetchCalendarList(accessToken)
+  if (!calendars.length) return { events: [], calendars: [] }
+
+  const results = await Promise.all(
+    calendars.map(async (cal) => {
+      try {
+        const params = new URLSearchParams({
+          timeMin,
+          timeMax,
+          singleEvents: 'true',
+          orderBy: 'startTime',
+          maxResults: '250',
+        })
+        const res = await fetch(
+          `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal.id)}/events?${params}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        )
+        if (!res.ok) return []
+        const data = await res.json()
+        return (data.items || []).map(e => ({
+          id: e.id,
+          summary: e.summary || '(No title)',
+          description: e.description || '',
+          location: e.location || '',
+          start_time: e.start?.dateTime || e.start?.date,
+          end_time: e.end?.dateTime || e.end?.date,
+          all_day: !e.start?.dateTime,
+          calendar_id: cal.id,
+          calendar_color: cal.backgroundColor,
+          calendar_name: cal.summary,
+          attendees: (e.attendees || []).map(a => a.email),
+          html_link: e.htmlLink || '',
+          created: e.created,
+          updated: e.updated,
+        }))
+      } catch {
+        return []
+      }
+    })
+  )
+
+  const events = results.flat().sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+  return { events, calendars }
+}
+
 // ── Seed default data for new user ──
 
 async function seedUserDefaults(db, userEmail) {
@@ -917,6 +987,57 @@ export default {
 
       // ── Admin: Get user email from header ──
       const userEmail = request.headers.get('X-User-Email')
+
+      // ── Day View: All calendars for a date range ──
+      if (path === '/api/calendar/day-view' && request.method === 'GET') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        // date param = YYYY-MM-DD; if omitted, use today
+        const dateParam = url.searchParams.get('date') || new Date().toISOString().slice(0, 10)
+        const daysParam = parseInt(url.searchParams.get('days') || '1', 10)
+        const startDate = new Date(`${dateParam}T00:00:00.000Z`)
+        const endDate = new Date(startDate.getTime() + daysParam * 24 * 60 * 60 * 1000)
+
+        const accessToken = await getCalendarToken(env, userEmail)
+        if (!accessToken) return json({ error: 'Google Calendar not connected', events: [], calendars: [] }, 200)
+
+        const { events, calendars } = await fetchAllCalendarEvents(
+          accessToken,
+          startDate.toISOString(),
+          endDate.toISOString()
+        )
+
+        // Also fetch D1 bookings for this range
+        const d1Result = await db.prepare(
+          'SELECT id, guest_name, guest_email, start_time, end_time, description, google_event_id FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?'
+        ).bind(userEmail, endDate.toISOString(), startDate.toISOString()).all()
+
+        const googleIds = new Set(events.map(e => e.id))
+        const appEvents = (d1Result.results || [])
+          .filter(b => !googleIds.has(b.google_event_id))
+          .map(b => ({
+            id: `app-${b.id}`,
+            summary: `Meeting: ${b.guest_name}`,
+            description: b.description || '',
+            location: '',
+            start_time: b.start_time,
+            end_time: b.end_time,
+            all_day: false,
+            calendar_id: 'app',
+            calendar_color: '#6366f1',
+            calendar_name: 'CalSync App',
+            attendees: [b.guest_email],
+            html_link: '',
+          }))
+
+        return json({
+          date: dateParam,
+          events: [...events, ...appEvents].sort((a, b) => new Date(a.start_time) - new Date(b.start_time)),
+          calendars: [
+            ...calendars,
+            { id: 'app', summary: 'CalSync App', backgroundColor: '#6366f1', foregroundColor: '#ffffff', primary: false },
+          ],
+        })
+      }
 
       // ── Admin: Setup / seed defaults ──
       if (path === '/api/admin/setup' && request.method === 'POST') {
