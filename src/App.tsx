@@ -580,7 +580,7 @@ function darkenHex(hex: string): string {
   } catch { return hex; }
 }
 
-const DayView = ({ userEmail }: { userEmail: string }) => {
+const DayView = ({ userEmail, ownerEmail }: { userEmail: string; ownerEmail: string }) => {
   const [currentDate, setCurrentDate] = useState<Date>(startOfDay(new Date()));
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [calendars, setCalendars] = useState<CalendarMeta[]>([]);
@@ -594,8 +594,9 @@ const DayView = ({ userEmail }: { userEmail: string }) => {
     setLoading(true);
     setError(null);
     const dateStr = format(date, 'yyyy-MM-dd');
+    const ownerParam = ownerEmail !== userEmail ? `&owner=${encodeURIComponent(ownerEmail)}` : '';
     try {
-      const res = await fetch(`/api/calendar/day-view?date=${dateStr}&days=1`, {
+      const res = await fetch(`/api/calendar/day-view?date=${dateStr}&days=1${ownerParam}`, {
         headers: { 'X-User-Email': userEmail },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -705,6 +706,14 @@ const DayView = ({ userEmail }: { userEmail: string }) => {
       {/* ── Error ──────────────────────────────────────── */}
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-2">{error}</div>
+      )}
+
+      {/* ── Viewing-as banner ──────────────────────────── */}
+      {ownerEmail !== userEmail && (
+        <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2 text-sm text-indigo-700 flex items-center gap-2">
+          <CalendarIcon className="w-4 h-4" />
+          Viewing <span className="font-semibold">{ownerEmail}</span>'s calendar
+        </div>
       )}
 
       {/* ── All-day events strip ────────────────────────── */}
@@ -903,14 +912,57 @@ const AdminSettingsView = ({
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
   const [editingGroupMeeting, setEditingGroupMeeting] = useState<Partial<GroupMeeting> | null>(null);
 
+  // Calendar sharing (viewers)
+  const [viewers, setViewers] = useState<{ viewer_email: string; added_at: number }[]>([]);
+  const [newViewerEmail, setNewViewerEmail] = useState('');
+  const [viewerSaving, setViewerSaving] = useState(false);
+  const [viewerError, setViewerError] = useState('');
+  const shareLink = `${window.location.origin}${window.location.pathname}?view=${encodeURIComponent(userEmail)}`;
+
   const authH = adminHeaders(userEmail);
   const authHJson = adminHeaders(userEmail, 'application/json');
+
+  const fetchViewers = () => {
+    fetch('/api/calendar/viewers', { headers: authH })
+      .then(r => r.json())
+      .then(d => setViewers(d.viewers || []))
+      .catch(() => {});
+  };
+
+  const addViewer = async () => {
+    if (!newViewerEmail.trim()) return;
+    setViewerSaving(true);
+    setViewerError('');
+    try {
+      const res = await fetch('/api/calendar/viewers', {
+        method: 'POST',
+        headers: authHJson,
+        body: JSON.stringify({ viewer_email: newViewerEmail.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setViewerError(data.error || 'Failed to add viewer'); return; }
+      setNewViewerEmail('');
+      fetchViewers();
+    } catch {
+      setViewerError('Network error');
+    } finally {
+      setViewerSaving(false);
+    }
+  };
+
+  const removeViewer = async (email: string) => {
+    await fetch(`/api/calendar/viewers?email=${encodeURIComponent(email)}`, { method: 'DELETE', headers: authH });
+    fetchViewers();
+  };
 
   useEffect(() => {
     fetch('/api/auth/calendar-status', { headers: authH }).then(r => r.json()).then(d => setIsGoogleConnected(d.connected)).catch(() => {});
     fetch('/api/admin/bookings', { headers: authH }).then(r => r.json()).then(d => setBookings(d.bookings || d)).catch(() => {});
     if (activeTab === 'group-meetings') {
       fetch('/api/admin/group-meetings', { headers: authH }).then(r => r.json()).then(d => setGroupMeetings(d.groupMeetings || d)).catch(() => {});
+    }
+    if (activeTab === 'integrations') {
+      fetchViewers();
     }
   }, [activeTab]);
 
@@ -1060,6 +1112,8 @@ const AdminSettingsView = ({
           {activeTab === 'integrations' && (
             <div className="space-y-6">
               <h2 className="text-2xl font-bold">Integrations</h2>
+
+              {/* Google Calendar connect */}
               <div className="p-6 border border-slate-100 rounded-2xl flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center">
@@ -1067,17 +1121,85 @@ const AdminSettingsView = ({
                   </div>
                   <div>
                     <h3 className="font-bold">Google Calendar</h3>
-                    <p className="text-sm text-slate-500">Sync bookings to your primary calendar</p>
+                    <p className="text-sm text-slate-500">
+                      {isGoogleConnected
+                        ? `Connected as ${userEmail} — includes all linked calendars`
+                        : 'Sync bookings and view all your linked calendars'}
+                    </p>
                   </div>
                 </div>
-                {isGoogleConnected ? (
-                  <div className="flex items-center gap-2 text-green-600 bg-green-50 px-3 py-1 rounded-full text-sm font-medium">
-                    <CheckCircle2 className="w-4 h-4" /> Connected
-                  </div>
-                ) : (
+                <div className="flex items-center gap-2">
+                  {isGoogleConnected && (
+                    <div className="flex items-center gap-2 text-green-600 bg-green-50 px-3 py-1 rounded-full text-sm font-medium">
+                      <CheckCircle2 className="w-4 h-4" /> Connected
+                    </div>
+                  )}
                   <Button variant="outline" onClick={handleConnectGoogle} className="flex items-center gap-2">
-                    Connect <ExternalLink className="w-4 h-4" />
+                    {isGoogleConnected ? 'Reconnect' : 'Connect'} <ExternalLink className="w-4 h-4" />
                   </Button>
+                </div>
+              </div>
+
+              {/* Calendar Sharing */}
+              <div className="p-6 border border-slate-100 rounded-2xl space-y-4">
+                <div className="flex items-center gap-3">
+                  <Users className="w-5 h-5 text-indigo-500" />
+                  <div>
+                    <h3 className="font-bold">Calendar Sharing</h3>
+                    <p className="text-sm text-slate-500">Allow other users (e.g. Superadmins) to view your calendar in Day View</p>
+                  </div>
+                </div>
+
+                {/* Shareable link */}
+                <div className="bg-slate-50 rounded-xl p-3 flex items-center gap-2">
+                  <code className="text-xs text-slate-600 flex-1 truncate">{shareLink}</code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(shareLink)}
+                    className="text-xs text-indigo-600 hover:underline flex-shrink-0"
+                  >
+                    Copy link
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400">Share this link with users you've added as viewers below. They must sign in first.</p>
+
+                {/* Add viewer */}
+                <div className="flex gap-2">
+                  <input
+                    type="email"
+                    placeholder="viewer@email.com"
+                    value={newViewerEmail}
+                    onChange={e => setNewViewerEmail(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && addViewer()}
+                    className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  />
+                  <Button onClick={addViewer} disabled={viewerSaving || !newViewerEmail.trim()}>
+                    {viewerSaving ? 'Adding…' : 'Add viewer'}
+                  </Button>
+                </div>
+                {viewerError && <p className="text-sm text-red-600">{viewerError}</p>}
+
+                {/* Viewer list */}
+                {viewers.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-4">No viewers yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {viewers.map(v => (
+                      <div key={v.viewer_email} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-600 text-xs font-bold flex items-center justify-center">
+                            {v.viewer_email[0].toUpperCase()}
+                          </div>
+                          <span className="text-sm text-slate-700">{v.viewer_email}</span>
+                        </div>
+                        <button
+                          onClick={() => removeViewer(v.viewer_email)}
+                          className="text-xs text-red-400 hover:text-red-600 transition-colors"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -1256,6 +1378,9 @@ export default function App() {
   // Determine calendar owner email (from URL param or logged-in user)
   const urlParams = new URLSearchParams(window.location.search);
   const ownerEmail = urlParams.get('user') || authUser?.email || '';
+
+  // If ?view=EMAIL is present, a Superadmin can view another user's calendar
+  const viewAsEmail = urlParams.get('view') || '';
 
   // Persist user to localStorage
   const persistUser = (user: { email: string; role?: string; user_id?: string | null; emailVerificationToken?: string | null }) => {
@@ -1459,7 +1584,10 @@ export default function App() {
             ownerEmail={ownerEmail}
           />
         ) : view === 'day-view' && authStatus === 'authed' ? (
-          <DayView userEmail={authUser!.email} />
+          <DayView
+            userEmail={authUser!.email}
+            ownerEmail={viewAsEmail || authUser!.email}
+          />
         ) : view === 'admin' && authStatus === 'authed' && settings ? (
           <AdminSettingsView
             settings={settings}

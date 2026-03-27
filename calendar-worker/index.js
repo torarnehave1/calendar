@@ -994,10 +994,22 @@ export default {
         // date param = YYYY-MM-DD; if omitted, use today
         const dateParam = url.searchParams.get('date') || new Date().toISOString().slice(0, 10)
         const daysParam = parseInt(url.searchParams.get('days') || '1', 10)
+        // Allow a viewer to view the owner's calendar by passing ?owner=EMAIL
+        const ownerParam = url.searchParams.get('owner') || userEmail
+
+        let calendarOwnerEmail = ownerParam
+        if (ownerParam !== userEmail) {
+          // Verify the requester is an authorized viewer
+          const viewerRow = await db.prepare(
+            'SELECT 1 FROM calendar_viewers WHERE viewer_email = ? AND owner_email = ?'
+          ).bind(userEmail, ownerParam).first()
+          if (!viewerRow) return json({ error: 'Not authorized to view this calendar' }, 403)
+        }
+
         const startDate = new Date(`${dateParam}T00:00:00.000Z`)
         const endDate = new Date(startDate.getTime() + daysParam * 24 * 60 * 60 * 1000)
 
-        const accessToken = await getCalendarToken(env, userEmail)
+        const accessToken = await getCalendarToken(env, calendarOwnerEmail)
         if (!accessToken) return json({ error: 'Google Calendar not connected', events: [], calendars: [] }, 200)
 
         const { events, calendars } = await fetchAllCalendarEvents(
@@ -1009,7 +1021,7 @@ export default {
         // Also fetch D1 bookings for this range
         const d1Result = await db.prepare(
           'SELECT id, guest_name, guest_email, start_time, end_time, description, google_event_id FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?'
-        ).bind(userEmail, endDate.toISOString(), startDate.toISOString()).all()
+        ).bind(calendarOwnerEmail, endDate.toISOString(), startDate.toISOString()).all()
 
         const googleIds = new Set(events.map(e => e.id))
         const appEvents = (d1Result.results || [])
@@ -1031,12 +1043,46 @@ export default {
 
         return json({
           date: dateParam,
+          owner: calendarOwnerEmail,
           events: [...events, ...appEvents].sort((a, b) => new Date(a.start_time) - new Date(b.start_time)),
           calendars: [
             ...calendars,
             { id: 'app', summary: 'CalSync App', backgroundColor: '#6366f1', foregroundColor: '#ffffff', primary: false },
           ],
         })
+      }
+
+      // ── Calendar Viewers: List ──
+      if (path === '/api/calendar/viewers' && request.method === 'GET') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const rows = await db.prepare(
+          'SELECT viewer_email, added_at FROM calendar_viewers WHERE owner_email = ? ORDER BY added_at DESC'
+        ).bind(userEmail).all()
+        return json({ viewers: rows.results || [] })
+      }
+
+      // ── Calendar Viewers: Add ──
+      if (path === '/api/calendar/viewers' && request.method === 'POST') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const { viewer_email } = await request.json()
+        if (!viewer_email) return json({ error: 'viewer_email required' }, 400)
+        const normalized = viewer_email.trim().toLowerCase()
+        if (normalized === userEmail.toLowerCase()) return json({ error: 'Cannot add yourself as a viewer' }, 400)
+        await db.prepare(
+          'INSERT OR IGNORE INTO calendar_viewers (viewer_email, owner_email, added_at) VALUES (?, ?, ?)'
+        ).bind(normalized, userEmail, Date.now()).run()
+        return json({ success: true, viewer_email: normalized })
+      }
+
+      // ── Calendar Viewers: Remove ──
+      if (path === '/api/calendar/viewers' && request.method === 'DELETE') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const emailToRemove = url.searchParams.get('email')
+        if (!emailToRemove) return json({ error: 'email param required' }, 400)
+        await db.prepare(
+          'DELETE FROM calendar_viewers WHERE viewer_email = ? AND owner_email = ?'
+        ).bind(emailToRemove, userEmail).run()
+        return json({ success: true })
       }
 
       // ── Admin: Setup / seed defaults ──
