@@ -20,7 +20,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^3.5.0",
-    "vegvisr-ui-kit": "github:torarnehave1/vegvisr-ui-kit",
+    "vegvisr-ui-kit": "^1.4.0",
     "vite": "^6.2.0"
   },
   "devDependencies": {
