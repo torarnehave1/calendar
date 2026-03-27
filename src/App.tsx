@@ -1509,8 +1509,12 @@ export default function App() {
         <EcosystemNav showRecorder={false} className="max-w-7xl mx-auto" />
       </div>
       <nav className="bg-white border-b border-slate-100 px-8 py-4 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center gap-2 font-bold text-xl text-indigo-600">
-          <CalendarIcon className="w-6 h-6" /> CalSync
+        <div className="flex items-center">
+          <img
+            src="https://favicons.vegvisr.org/favicons/1774599151506-1-1774599160672-512x512.png"
+            alt="CalSync"
+            className="w-[200px] h-[200px] object-contain"
+          />
         </div>
         <div className="flex items-center gap-4">
           {authStatus === 'authed' && authUser ? (
