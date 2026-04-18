@@ -1557,9 +1557,10 @@ export default function App() {
   const urlParams = currentUrl.searchParams;
   const pathSegments = currentUrl.pathname.split('/').filter(Boolean);
   const publicPathSegment = pathSegments[0] || '';
+  const decodedPublicPathSegment = publicPathSegment ? decodeURIComponent(publicPathSegment) : '';
   const initialOwnerFromQuery = urlParams.get('user') || '';
   // Email-shaped path is treated as direct owner; slugs require backend lookup.
-  const initialOwnerFromPath = publicPathSegment && publicPathSegment.includes('@')
+  const initialOwnerFromPath = decodedPublicPathSegment.includes('@')
     ? normalizePublicBookingValue(publicPathSegment)
     : '';
 
