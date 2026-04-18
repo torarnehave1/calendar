@@ -83,6 +83,7 @@ interface Settings {
   availability_start: string;
   availability_end: string;
   timezone: string;
+  public_slug?: string | null;
 }
 
 interface AvailabilityDay {
@@ -119,6 +120,28 @@ interface Booking {
   google_event_id?: string;
 }
 
+interface PublicBookingPage {
+  slug: string;
+  email: string;
+  title: string;
+  description: string;
+}
+
+const normalizePublicBookingValue = (value: string) => decodeURIComponent(value).trim().toLowerCase();
+
+const getPublicBookingPath = (slugOrEmail: string) => {
+  const normalized = slugOrEmail.trim().toLowerCase();
+  if (!normalized) return '/';
+  return `/${encodeURIComponent(normalized)}`;
+};
+
+const getPublicBookingLink = (slugOrEmail: string) => `${window.location.origin}${getPublicBookingPath(slugOrEmail)}`;
+
+const getPrivateViewerLink = (email: string) => `${window.location.origin}/?view=${encodeURIComponent(email)}`;
+
+const RESERVED_SLUGS = new Set(['api', 'auth', 'admin', 'public', 'login', 'signup', 'settings', 'day-view', 'dayview']);
+const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
 // --- Components ---
 
 const Button = ({ className, variant = 'primary', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'outline' }) => {
@@ -151,6 +174,118 @@ const adminHeaders = (email: string, contentType?: string): Record<string, strin
   if (contentType) h['Content-Type'] = contentType;
   return h;
 };
+
+const RootLandingPage = ({
+  authUser,
+  pages,
+  pagesLoading,
+  onOpenMyBookingPage,
+  onOpenDayView,
+  onOpenAdmin,
+  onOpenLogin,
+  unknownBookingPath,
+}: {
+  authUser: AuthUser | null;
+  pages: PublicBookingPage[];
+  pagesLoading: boolean;
+  onOpenMyBookingPage: () => void;
+  onOpenDayView: () => void;
+  onOpenAdmin: () => void;
+  onOpenLogin: () => void;
+  unknownBookingPath?: string;
+}) => (
+  <div className="max-w-6xl mx-auto px-4 md:px-8">
+    <div className="rounded-[2rem] border border-slate-200 bg-white shadow-sm overflow-hidden">
+      <div className="bg-[radial-gradient(circle_at_top_left,_rgba(99,102,241,0.18),_transparent_35%),linear-gradient(135deg,_#0f172a,_#1e293b_55%,_#312e81)] px-8 py-14 md:px-12 text-white">
+        <div className="max-w-3xl space-y-5">
+          <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-indigo-100">
+            <Globe className="w-4 h-4" />
+            Public booking pages
+          </div>
+          <h1 className="text-4xl md:text-5xl font-bold leading-tight">Book time without exposing the private calendar.</h1>
+          <p className="text-base md:text-lg text-slate-200 max-w-2xl">
+            Public visitors get booking pages only. Private calendar access stays limited to approved viewers inside Day View.
+          </p>
+          {unknownBookingPath && (
+            <div className="inline-flex items-center rounded-2xl bg-amber-400/15 px-4 py-3 text-sm text-amber-100 border border-amber-300/20">
+              No public booking page was found for <span className="font-semibold mx-1">/{unknownBookingPath}</span>. Use one of the pages below instead.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-8 px-8 py-10 md:px-12 lg:grid-cols-[1.4fr_1fr]">
+        <section className="space-y-4">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900">Available booking pages</h2>
+              <p className="text-sm text-slate-500">Open a public page to see available meeting types and book directly.</p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            {pagesLoading ? (
+              <div className="col-span-full text-sm text-slate-500">Loading public booking pages…</div>
+            ) : pages.length === 0 ? (
+              <div className="col-span-full rounded-3xl border border-dashed border-slate-200 p-6 text-sm text-slate-500">
+                No public booking pages have been published yet. Sign in and pick a public path in admin to publish yours.
+              </div>
+            ) : (
+              pages.map(page => (
+                <button
+                  key={page.slug}
+                  onClick={() => window.location.assign(getPublicBookingPath(page.slug))}
+                  className="group rounded-3xl border border-slate-200 bg-slate-50 p-6 text-left transition-all hover:-translate-y-0.5 hover:border-indigo-200 hover:bg-white hover:shadow-lg"
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-lg font-semibold text-slate-900">{page.title}</p>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">{page.description}</p>
+                    </div>
+                    <div className="rounded-2xl bg-indigo-100 p-3 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                      <CalendarIcon className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <div className="mt-6 flex items-center justify-between text-sm">
+                    <span className="font-mono text-slate-500">{window.location.host}/{page.slug}</span>
+                    <span className="font-semibold text-indigo-600">Open</span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </section>
+
+        <aside className="rounded-3xl border border-slate-200 bg-slate-50 p-6 space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-2xl font-bold text-slate-900">Admin</h2>
+            <p className="text-sm text-slate-500">
+              {authUser ? 'Manage your own calendar, availability, and sharing settings.' : 'Sign in to manage your booking page and private calendar.'}
+            </p>
+          </div>
+
+          {authUser ? (
+            <div className="space-y-3">
+              <Button onClick={onOpenMyBookingPage} className="w-full justify-center">Open my booking page</Button>
+              <Button onClick={onOpenDayView} variant="outline" className="w-full justify-center">Open day view</Button>
+              <Button onClick={onOpenAdmin} variant="secondary" className="w-full justify-center">Open admin</Button>
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+                Signed in as <span className="font-medium text-slate-700">{authUser.email}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Button onClick={onOpenLogin} className="w-full justify-center">Sign in to manage calendar</Button>
+              <p className="text-xs leading-5 text-slate-500">
+                Private calendar visibility is still restricted. Only approved viewers can open another person's day view.
+              </p>
+            </div>
+          )}
+        </aside>
+      </div>
+    </div>
+  </div>
+);
 
 // --- Views ---
 
@@ -918,7 +1053,8 @@ const AdminSettingsView = ({
   const [newViewerEmail, setNewViewerEmail] = useState('');
   const [viewerSaving, setViewerSaving] = useState(false);
   const [viewerError, setViewerError] = useState('');
-  const shareLink = `${window.location.origin}${window.location.pathname}?view=${encodeURIComponent(userEmail)}`;
+  const publicBookingLink = getPublicBookingLink(localSettings.public_slug || userEmail);
+  const viewerShareLink = getPrivateViewerLink(userEmail);
 
   const authH = adminHeaders(userEmail);
   const authHJson = adminHeaders(userEmail, 'application/json');
@@ -992,13 +1128,33 @@ const AdminSettingsView = ({
     window.location.href = 'https://auth.vegvisr.org/calendar/auth';
   };
 
+  const [profileError, setProfileError] = useState<string>('');
+  const [profileStatus, setProfileStatus] = useState<string>('');
+
+  const slugValue = (localSettings.public_slug || '').toLowerCase();
+  const slugIsEmpty = slugValue === '';
+  const slugIsValid = slugIsEmpty || (SLUG_PATTERN.test(slugValue) && !RESERVED_SLUGS.has(slugValue));
+
   const saveProfile = async () => {
-    await fetch('/api/admin/settings', {
+    setProfileError('');
+    setProfileStatus('');
+    if (!slugIsValid) {
+      setProfileError('Public path must be 1-40 lowercase letters, numbers, or hyphens, and not a reserved word.');
+      return;
+    }
+    const payload = { ...localSettings, public_slug: slugIsEmpty ? null : slugValue };
+    const res = await fetch('/api/admin/settings', {
       method: 'POST',
       headers: authHJson,
-      body: JSON.stringify(localSettings)
+      body: JSON.stringify(payload)
     });
-    onUpdateSettings(localSettings);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setProfileError(data?.error || 'Failed to save profile.');
+      return;
+    }
+    onUpdateSettings({ ...localSettings, public_slug: payload.public_slug });
+    setProfileStatus('Profile saved.');
   };
 
   const saveAvailability = async () => {
@@ -1067,7 +1223,24 @@ const AdminSettingsView = ({
                   <Palette className="text-slate-400" />
                   <Input type="color" label="Primary Color" className="h-10 w-20 p-1" value={localSettings.primary_color} onChange={e => setLocalSettings({...localSettings, primary_color: e.target.value})} />
                 </div>
+                <div className="md:col-span-2 space-y-1">
+                  <label className="text-sm font-medium text-slate-700">Public booking path</label>
+                  <div className="flex items-stretch rounded-lg border border-slate-200 focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-indigo-500 overflow-hidden">
+                    <span className="px-3 py-2 bg-slate-50 text-sm text-slate-500 font-mono">{window.location.host}/</span>
+                    <input
+                      type="text"
+                      className="flex-1 px-3 py-2 outline-none text-sm font-mono"
+                      placeholder="your-name"
+                      value={localSettings.public_slug || ''}
+                      onChange={e => setLocalSettings({...localSettings, public_slug: e.target.value.toLowerCase()})}
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500">Lowercase letters, numbers, and hyphens. Leave empty to disable the public path.</p>
+                  {!slugIsValid && <p className="text-xs text-red-600">Invalid path. Use 1-40 lowercase letters, numbers, or hyphens, and avoid reserved words.</p>}
+                </div>
               </div>
+              {profileError && <p className="text-sm text-red-600">{profileError}</p>}
+              {profileStatus && <p className="text-sm text-green-600">{profileStatus}</p>}
               <Button onClick={saveProfile}>Save Changes</Button>
             </div>
           )}
@@ -1144,6 +1317,26 @@ const AdminSettingsView = ({
               {/* Calendar Sharing */}
               <div className="p-6 border border-slate-100 rounded-2xl space-y-4">
                 <div className="flex items-center gap-3">
+                  <Globe className="w-5 h-5 text-indigo-500" />
+                  <div>
+                    <h3 className="font-bold">Public booking page</h3>
+                    <p className="text-sm text-slate-500">Share this public page when someone should book time with you.</p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-xl p-3 flex items-center gap-2">
+                  <code className="text-xs text-slate-600 flex-1 truncate">{publicBookingLink}</code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(publicBookingLink)}
+                    className="text-xs text-indigo-600 hover:underline flex-shrink-0"
+                  >
+                    Copy link
+                  </button>
+                </div>
+
+                <div className="h-px bg-slate-100" />
+
+                <div className="flex items-center gap-3">
                   <Users className="w-5 h-5 text-indigo-500" />
                   <div>
                     <h3 className="font-bold">Calendar Sharing</h3>
@@ -1153,9 +1346,9 @@ const AdminSettingsView = ({
 
                 {/* Shareable link */}
                 <div className="bg-slate-50 rounded-xl p-3 flex items-center gap-2">
-                  <code className="text-xs text-slate-600 flex-1 truncate">{shareLink}</code>
+                  <code className="text-xs text-slate-600 flex-1 truncate">{viewerShareLink}</code>
                   <button
-                    onClick={() => navigator.clipboard.writeText(shareLink)}
+                    onClick={() => navigator.clipboard.writeText(viewerShareLink)}
                     className="text-xs text-indigo-600 hover:underline flex-shrink-0"
                   >
                     Copy link
@@ -1360,12 +1553,38 @@ const AdminSettingsView = ({
 };
 
 export default function App() {
-  const [view, setView] = useState<'public' | 'admin' | 'day-view'>('public');
+  const currentUrl = new URL(window.location.href);
+  const urlParams = currentUrl.searchParams;
+  const pathSegments = currentUrl.pathname.split('/').filter(Boolean);
+  const publicPathSegment = pathSegments[0] || '';
+  const initialOwnerFromQuery = urlParams.get('user') || '';
+  // Email-shaped path is treated as direct owner; slugs require backend lookup.
+  const initialOwnerFromPath = publicPathSegment && publicPathSegment.includes('@')
+    ? normalizePublicBookingValue(publicPathSegment)
+    : '';
+
+  // If ?view=EMAIL is present, a Superadmin can view another user's calendar
+  const viewAsEmail = urlParams.get('view') || '';
+
+  const [view, setView] = useState<'public' | 'admin' | 'day-view'>(viewAsEmail ? 'day-view' : 'public');
   const [settings, setSettings] = useState<Settings | null>(null);
   const [availability, setAvailability] = useState<AvailabilityDay[]>([]);
   const [meetingTypes, setMeetingTypes] = useState<MeetingType[]>([]);
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Resolution of the public owner from path/query (email is sync, slug is async via backend lookup).
+  const [explicitPublicOwnerEmail, setExplicitPublicOwnerEmail] = useState<string>(
+    initialOwnerFromQuery || initialOwnerFromPath
+  );
+  const [unknownPublicPath, setUnknownPublicPath] = useState<boolean>(false);
+  const [resolvingPublicPath, setResolvingPublicPath] = useState<boolean>(
+    Boolean(publicPathSegment) && !initialOwnerFromQuery && !initialOwnerFromPath
+  );
+
+  // Public booking pages list for the root landing page
+  const [publicPages, setPublicPages] = useState<PublicBookingPage[]>([]);
+  const [publicPagesLoading, setPublicPagesLoading] = useState<boolean>(false);
 
   // Auth state
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -1376,12 +1595,11 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
 
-  // Determine calendar owner email (from URL param or logged-in user)
-  const urlParams = new URLSearchParams(window.location.search);
-  const ownerEmail = urlParams.get('user') || authUser?.email || '';
-
-  // If ?view=EMAIL is present, a Superadmin can view another user's calendar
-  const viewAsEmail = urlParams.get('view') || '';
+  const openMyPublicBookingPage = () => {
+    if (!authUser?.email) return;
+    const target = settings?.public_slug || authUser.email;
+    window.location.assign(getPublicBookingPath(target));
+  };
 
   // Persist user to localStorage
   const persistUser = (user: { email: string; role?: string; user_id?: string | null; emailVerificationToken?: string | null }) => {
@@ -1463,13 +1681,74 @@ export default function App() {
     }
   }, []);
 
-  // Load public settings when owner email is known
+  // Resolve a slug-style public path to an owner email via the backend.
   useEffect(() => {
-    if (!ownerEmail) {
-      setLoading(false);
+    if (!publicPathSegment) {
+      setUnknownPublicPath(false);
+      setResolvingPublicPath(false);
       return;
     }
-    fetch(`/api/public/settings?user=${encodeURIComponent(ownerEmail)}`)
+    if (initialOwnerFromQuery || initialOwnerFromPath) {
+      setUnknownPublicPath(false);
+      setResolvingPublicPath(false);
+      return;
+    }
+
+    const slug = normalizePublicBookingValue(publicPathSegment);
+    setResolvingPublicPath(true);
+    fetch(`/api/public/lookup-slug?slug=${encodeURIComponent(slug)}`)
+      .then(async r => {
+        if (!r.ok) {
+          setExplicitPublicOwnerEmail('');
+          setUnknownPublicPath(true);
+          return;
+        }
+        const data = await r.json();
+        if (data?.email) {
+          setExplicitPublicOwnerEmail(data.email);
+          setUnknownPublicPath(false);
+        } else {
+          setExplicitPublicOwnerEmail('');
+          setUnknownPublicPath(true);
+        }
+      })
+      .catch(() => {
+        setExplicitPublicOwnerEmail('');
+        setUnknownPublicPath(true);
+      })
+      .finally(() => setResolvingPublicPath(false));
+  }, [publicPathSegment, initialOwnerFromQuery, initialOwnerFromPath]);
+
+  // Load published booking pages for the root landing page when no specific page is requested.
+  useEffect(() => {
+    if (publicPathSegment || initialOwnerFromQuery) return;
+    setPublicPagesLoading(true);
+    fetch('/api/public/pages')
+      .then(r => (r.ok ? r.json() : { pages: [] }))
+      .then(data => {
+        const rows: Array<{ slug?: string; email?: string; name?: string; bio?: string }> = data?.pages || [];
+        setPublicPages(
+          rows
+            .filter(p => p.slug && p.email)
+            .map(p => ({
+              slug: p.slug as string,
+              email: p.email as string,
+              title: p.name && p.name.trim() ? p.name : (p.slug as string),
+              description: p.bio && p.bio.trim() ? p.bio : 'Open this public page to see meeting types and book a time.',
+            }))
+        );
+      })
+      .catch(() => setPublicPages([]))
+      .finally(() => setPublicPagesLoading(false));
+  }, [publicPathSegment, initialOwnerFromQuery]);
+
+  // Load public settings when owner email is known
+  useEffect(() => {
+    if (!explicitPublicOwnerEmail) {
+      if (!resolvingPublicPath) setLoading(false);
+      return;
+    }
+    fetch(`/api/public/settings?user=${encodeURIComponent(explicitPublicOwnerEmail)}`)
       .then(r => r.json())
       .then(data => {
         if (data.settings) {
@@ -1477,11 +1756,16 @@ export default function App() {
           setAvailability(data.availability || []);
           setMeetingTypes(data.meetingTypes || []);
           setGroupMeetings(data.groupMeetings || []);
+        } else {
+          setSettings(null);
+          setAvailability([]);
+          setMeetingTypes([]);
+          setGroupMeetings([]);
         }
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [ownerEmail]);
+  }, [explicitPublicOwnerEmail]);
 
   // Auto-setup defaults for new user on first login
   useEffect(() => {
@@ -1521,7 +1805,7 @@ export default function App() {
             <>
               <span className="text-sm text-slate-500">{authUser.email}</span>
               <button
-                onClick={() => setView('public')}
+                onClick={openMyPublicBookingPage}
                 className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all", view === 'public' ? "bg-indigo-50 text-indigo-600" : "text-slate-600 hover:bg-slate-50")}
               >
                 Public View
@@ -1577,19 +1861,26 @@ export default function App() {
       )}
 
       <main className="py-12">
-        {loading ? (
+        {loading || resolvingPublicPath ? (
           <div className="flex items-center justify-center py-20">Loading...</div>
-        ) : !settings && !ownerEmail ? (
-          <div className="text-center py-20 text-slate-500">
-            <p className="text-lg">Sign in to set up your calendar, or visit a calendar via direct link.</p>
-          </div>
-        ) : view === 'public' && settings ? (
+        ) : view === 'public' && settings && explicitPublicOwnerEmail ? (
           <PublicBookingView
             settings={settings}
             availability={availability}
             meetingTypes={meetingTypes}
             groupMeetings={groupMeetings}
-            ownerEmail={ownerEmail}
+            ownerEmail={explicitPublicOwnerEmail}
+          />
+        ) : view === 'public' ? (
+          <RootLandingPage
+            authUser={authUser}
+            pages={publicPages}
+            pagesLoading={publicPagesLoading}
+            onOpenMyBookingPage={openMyPublicBookingPage}
+            onOpenDayView={() => setView('day-view')}
+            onOpenAdmin={() => setView('admin')}
+            onOpenLogin={() => setLoginOpen(true)}
+            unknownBookingPath={unknownPublicPath ? publicPathSegment : undefined}
           />
         ) : view === 'day-view' && authStatus === 'authed' ? (
           <DayView

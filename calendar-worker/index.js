@@ -814,13 +814,34 @@ export default {
         })
       }
 
+      // ── Public: Look up owner email by public slug ──
+      if (path === '/api/public/lookup-slug' && request.method === 'GET') {
+        const slug = (url.searchParams.get('slug') || '').trim().toLowerCase()
+        if (!slug) return json({ error: 'slug query param required' }, 400)
+
+        const row = await db.prepare(
+          'SELECT user_email FROM settings WHERE public_slug = ?'
+        ).bind(slug).first()
+
+        if (!row) return json({ error: 'Slug not found' }, 404)
+        return json({ slug, email: row.user_email })
+      }
+
+      // ── Public: List published booking pages (those with a public_slug) ──
+      if (path === '/api/public/pages' && request.method === 'GET') {
+        const rows = await db.prepare(
+          "SELECT public_slug AS slug, user_email AS email, name, bio FROM settings WHERE public_slug IS NOT NULL AND public_slug != '' ORDER BY public_slug"
+        ).all()
+        return json({ pages: rows.results || [] })
+      }
+
       // ── Public: Get settings + availability + meeting types + group meetings ──
       if (path === '/api/public/settings' && request.method === 'GET') {
         const userEmail = url.searchParams.get('user')
         if (!userEmail) return json({ error: 'user query param required' }, 400)
 
         const settings = await db.prepare(
-          'SELECT name, bio, primary_color, availability_start, availability_end, timezone FROM settings WHERE user_email = ?'
+          'SELECT name, bio, primary_color, availability_start, availability_end, timezone, public_slug FROM settings WHERE user_email = ?'
         ).bind(userEmail).first()
 
         if (!settings) return json({ error: 'User not found' }, 404)
@@ -1134,6 +1155,32 @@ export default {
           `UPDATE settings SET name = ?, bio = ?, primary_color = ?, availability_start = ?, availability_end = ?, timezone = ?, updated_at = datetime('now')
            WHERE user_email = ?`
         ).bind(name, bio, primary_color, availability_start, availability_end, timezone, userEmail).run()
+
+        // Optional: update public_slug if provided. Validate format and uniqueness separately.
+        if (Object.prototype.hasOwnProperty.call(body, 'public_slug')) {
+          const rawSlug = (body.public_slug ?? '').toString().trim().toLowerCase()
+
+          if (rawSlug === '') {
+            await db.prepare('UPDATE settings SET public_slug = NULL WHERE user_email = ?').bind(userEmail).run()
+          } else {
+            if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(rawSlug)) {
+              return json({ error: 'Invalid slug. Use 1-40 lowercase letters, numbers, or hyphens; cannot start or end with a hyphen.' }, 400)
+            }
+            const RESERVED = new Set(['api', 'auth', 'admin', 'public', 'login', 'signup', 'settings', 'day-view', 'dayview'])
+            if (RESERVED.has(rawSlug)) {
+              return json({ error: 'This slug is reserved. Please choose another.' }, 400)
+            }
+            const taken = await db.prepare(
+              'SELECT 1 FROM settings WHERE public_slug = ? AND user_email != ?'
+            ).bind(rawSlug, userEmail).first()
+            if (taken) {
+              return json({ error: 'This slug is already in use by another user.' }, 409)
+            }
+            await db.prepare(
+              `UPDATE settings SET public_slug = ?, updated_at = datetime('now') WHERE user_email = ?`
+            ).bind(rawSlug, userEmail).run()
+          }
+        }
 
         return json({ success: true })
       }
