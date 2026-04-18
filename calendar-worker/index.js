@@ -841,7 +841,7 @@ export default {
         if (!userEmail) return json({ error: 'user query param required' }, 400)
 
         const settings = await db.prepare(
-          'SELECT name, bio, primary_color, availability_start, availability_end, timezone, public_slug FROM settings WHERE user_email = ?'
+          'SELECT name, bio, primary_color, availability_start, availability_end, timezone, public_slug, default_meeting_room FROM settings WHERE user_email = ?'
         ).bind(userEmail).first()
 
         if (!settings) return json({ error: 'User not found' }, 404)
@@ -937,9 +937,17 @@ export default {
             const mt = await db.prepare('SELECT name FROM meeting_types WHERE id = ?').bind(meeting_type_id).first()
             if (mt) summary = `${mt.name} with ${guest_name}`
           }
+          const ownerSettings = await db.prepare(
+            'SELECT default_meeting_room FROM settings WHERE user_email = ?'
+          ).bind(owner_email).first()
+          const meetingRoom = ownerSettings?.default_meeting_room || ''
+          const eventDescription = meetingRoom
+            ? `${description || ''}${description ? '\n\n' : ''}Join the meeting: ${meetingRoom}`
+            : (description || '')
           const gcalEvent = await createGoogleCalendarEvent(accessToken, {
             summary,
-            description: description || '',
+            description: eventDescription,
+            location: meetingRoom || undefined,
             start: { dateTime: start_time },
             end: { dateTime: end_time },
             attendees: [{ email: guest_email }],
@@ -1165,6 +1173,24 @@ export default {
           `UPDATE settings SET name = ?, bio = ?, primary_color = ?, availability_start = ?, availability_end = ?, timezone = ?, updated_at = datetime('now')
            WHERE user_email = ?`
         ).bind(name, bio, primary_color, availability_start, availability_end, timezone, userEmail).run()
+
+        // Optional: update default_meeting_room if provided (empty string clears it).
+        if (Object.prototype.hasOwnProperty.call(body, 'default_meeting_room')) {
+          const raw = (body.default_meeting_room ?? '').toString().trim()
+          if (raw === '') {
+            await db.prepare('UPDATE settings SET default_meeting_room = NULL WHERE user_email = ?').bind(userEmail).run()
+          } else {
+            if (!/^https?:\/\//i.test(raw)) {
+              return json({ error: 'Default meeting room must be a valid http(s) URL.' }, 400)
+            }
+            if (raw.length > 500) {
+              return json({ error: 'Default meeting room URL is too long.' }, 400)
+            }
+            await db.prepare(
+              `UPDATE settings SET default_meeting_room = ?, updated_at = datetime('now') WHERE user_email = ?`
+            ).bind(raw, userEmail).run()
+          }
+        }
 
         // Optional: update public_slug if provided. Validate format and uniqueness separately.
         if (Object.prototype.hasOwnProperty.call(body, 'public_slug')) {

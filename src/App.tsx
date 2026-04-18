@@ -84,6 +84,7 @@ interface Settings {
   availability_end: string;
   timezone: string;
   public_slug?: string | null;
+  default_meeting_room?: string | null;
 }
 
 interface AvailabilityDay {
@@ -1237,6 +1238,17 @@ const AdminSettingsView = ({
                   </div>
                   <p className="text-xs text-slate-500">Lowercase letters, numbers, and hyphens. Leave empty to disable the public path.</p>
                   {!slugIsValid && <p className="text-xs text-red-600">Invalid path. Use 1-40 lowercase letters, numbers, or hyphens, and avoid reserved words.</p>}
+                </div>
+                <div className="md:col-span-2 space-y-1">
+                  <label className="text-sm font-medium text-slate-700">Default meeting room</label>
+                  <input
+                    type="url"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-mono"
+                    placeholder="https://realtime.vegvisr.org/?meetingId=..."
+                    value={localSettings.default_meeting_room || ''}
+                    onChange={e => setLocalSettings({...localSettings, default_meeting_room: e.target.value})}
+                  />
+                  <p className="text-xs text-slate-500">Used as the location link on every booking you receive. Leave empty to omit.</p>
                 </div>
               </div>
               {profileError && <p className="text-sm text-red-600">{profileError}</p>}
