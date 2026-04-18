@@ -312,8 +312,8 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
   }, [selectedDate, ownerEmail]);
 
   const days = eachDayOfInterval({
-    start: startOfWeek(startOfMonth(currentMonth)),
-    end: endOfWeek(endOfMonth(currentMonth))
+    start: startOfWeek(startOfMonth(currentMonth), { weekStartsOn: 1 }),
+    end: endOfWeek(endOfMonth(currentMonth), { weekStartsOn: 1 })
   });
 
   const isDayAvailable = (date: Date) => {
@@ -533,7 +533,7 @@ const PublicBookingView = ({ settings, availability, meetingTypes, groupMeetings
                 </div>
 
                 <div className="grid grid-cols-7 gap-2 mb-8">
-                  {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => (
                     <div key={d} className="text-center text-xs font-bold text-slate-400 uppercase py-2">{d}</div>
                   ))}
                   {days.map((day, idx) => {
@@ -1256,7 +1256,15 @@ const AdminSettingsView = ({
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-slate-700">Available Days</label>
                   <div className="grid grid-cols-7 gap-2">
-                    {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, idx) => {
+                    {[
+                      { label: 'M', idx: 1 },
+                      { label: 'T', idx: 2 },
+                      { label: 'W', idx: 3 },
+                      { label: 'T', idx: 4 },
+                      { label: 'F', idx: 5 },
+                      { label: 'S', idx: 6 },
+                      { label: 'S', idx: 0 },
+                    ].map(({ label, idx }) => {
                       const isAvail = localAvailability.find(a => a.day_of_week === idx)?.is_available === 1;
                       return (
                         <button
@@ -1272,7 +1280,7 @@ const AdminSettingsView = ({
                             isAvail ? "bg-indigo-600 text-white shadow-md" : "bg-slate-100 text-slate-400 hover:bg-slate-200"
                           )}
                         >
-                          {day}
+                          {label}
                         </button>
                       );
                     })}

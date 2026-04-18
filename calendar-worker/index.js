@@ -905,13 +905,23 @@ export default {
           return json({ error: 'owner_email, guest_name, guest_email, start_time, end_time are required' }, 400)
         }
 
-        // Check for overlapping bookings
+        // Check for overlapping bookings in D1
         const conflict = await db.prepare(
           `SELECT id FROM bookings WHERE user_email = ? AND start_time < ? AND end_time > ?`
         ).bind(owner_email, end_time, start_time).first()
 
         if (conflict) {
           return json({ error: 'This time slot is already booked. Please choose a different time.' }, 409)
+        }
+
+        // Also check Google Calendar for conflicts (events created outside this app)
+        const preCheckToken = await getCalendarToken(env, owner_email)
+        if (preCheckToken) {
+          const gcalConflicts = await fetchGoogleCalendarEvents(preCheckToken, start_time, end_time)
+          const overlapping = gcalConflicts.find(e => e.start_time < end_time && e.end_time > start_time)
+          if (overlapping) {
+            return json({ error: 'This time slot conflicts with an existing calendar event. Please choose a different time.' }, 409)
+          }
         }
 
         const result = await db.prepare(
@@ -1266,6 +1276,16 @@ export default {
 
         if (conflict) {
           return json({ error: 'The new time slot conflicts with an existing booking.' }, 409)
+        }
+
+        // Also check Google Calendar (skip the current booking's own event)
+        const rescheduleToken = await getCalendarToken(env, userEmail)
+        if (rescheduleToken) {
+          const gcalConflicts = await fetchGoogleCalendarEvents(rescheduleToken, start_time, end_time)
+          const overlapping = gcalConflicts.find(e => e.start_time < end_time && e.end_time > start_time)
+          if (overlapping) {
+            return json({ error: 'The new time slot conflicts with an existing calendar event.' }, 409)
+          }
         }
 
         // Update D1
