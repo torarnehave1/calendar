@@ -121,6 +121,25 @@ interface Booking {
   google_event_id?: string;
 }
 
+interface ClientReportRow {
+  client_ref: string;
+  client_name: string;
+  client_email: string;
+  booking_count: number;
+  app_booking_count: number;
+  google_booking_count: number;
+  last_meeting_at: string | null;
+  last_meeting_name: string | null;
+  next_meeting_at: string | null;
+  next_meeting_name: string | null;
+  last_source: 'app' | 'google' | null;
+  meeting_quality: number | null;
+  critical_note: string;
+  reminder_sent_at: string | null;
+  no_meeting_three_weeks: boolean;
+  no_booking_after_reminder: boolean;
+}
+
 interface PublicBookingPage {
   slug: string;
   email: string;
@@ -139,6 +158,20 @@ const getPublicBookingPath = (slugOrEmail: string) => {
 const getPublicBookingLink = (slugOrEmail: string) => `${window.location.origin}${getPublicBookingPath(slugOrEmail)}`;
 
 const getPrivateViewerLink = (email: string) => `${window.location.origin}/?view=${encodeURIComponent(email)}`;
+
+const formatReportDate = (value: string | null | undefined) => {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return format(parsed, 'MMM d, yyyy');
+};
+
+const formatReportDateTime = (value: string | null | undefined) => {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return format(parsed, 'MMM d, yyyy HH:mm');
+};
 
 const RESERVED_SLUGS = new Set(['api', 'auth', 'admin', 'public', 'login', 'signup', 'settings', 'day-view', 'dayview']);
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
@@ -1044,10 +1077,17 @@ const AdminSettingsView = ({
   const [localSettings, setLocalSettings] = useState(settings);
   const [localAvailability, setLocalAvailability] = useState(availability);
   const [isGoogleConnected, setIsGoogleConnected] = useState(false);
-  const [activeTab, setActiveTab] = useState<'profile' | 'availability' | 'integrations' | 'bookings' | 'group-meetings'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'availability' | 'integrations' | 'bookings' | 'reports' | 'group-meetings'>('profile');
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [clientReports, setClientReports] = useState<ClientReportRow[]>([]);
   const [groupMeetings, setGroupMeetings] = useState<GroupMeeting[]>([]);
   const [editingGroupMeeting, setEditingGroupMeeting] = useState<Partial<GroupMeeting> | null>(null);
+  const [reportSavingRef, setReportSavingRef] = useState<string | null>(null);
+  const [reportError, setReportError] = useState('');
+  const [reportSort, setReportSort] = useState<{ key: keyof ClientReportRow; direction: 'asc' | 'desc' }>({
+    key: 'last_meeting_at',
+    direction: 'desc',
+  });
 
   // Calendar sharing (viewers)
   const [viewers, setViewers] = useState<{ viewer_email: string; added_at: number }[]>([]);
@@ -1067,10 +1107,77 @@ const AdminSettingsView = ({
       .catch(() => {});
   };
 
+
+  const fetchClientReports = () => {
+    fetch('/api/admin/client-reports', { headers: authH })
+      .then(r => r.json())
+      .then(d => setClientReports(d.reports || []))
+      .catch(() => setClientReports([]));
+  };
+
+  const updateClientReportField = <K extends keyof ClientReportRow>(clientRef: string, field: K, value: ClientReportRow[K]) => {
+    setClientReports(prev => prev.map(row => row.client_ref === clientRef ? { ...row, [field]: value } : row));
+  };
+
+  const saveClientReport = async (row: ClientReportRow) => {
+    setReportSavingRef(row.client_ref);
+    setReportError('');
+    try {
+      const res = await fetch('/api/admin/client-reports', {
+        method: 'POST',
+        headers: authHJson,
+        body: JSON.stringify({
+          client_ref: row.client_ref,
+          client_name: row.client_name,
+          client_email: row.client_email,
+          meeting_quality: row.meeting_quality,
+          critical_note: row.critical_note,
+          reminder_sent_at: row.reminder_sent_at,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReportError(data?.error || 'Failed to save report row.');
+        return;
+      }
+      fetchClientReports();
+    } catch {
+      setReportError('Network error while saving report row.');
+    } finally {
+      setReportSavingRef(null);
+    }
+  };
+
+  const toggleReportSort = (key: keyof ClientReportRow) => {
+    setReportSort(current => current.key === key
+      ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { key, direction: key === 'client_name' ? 'asc' : 'desc' });
+  };
+
+  const sortedClientReports = [...clientReports].sort((left, right) => {
+    const getValue = (row: ClientReportRow) => {
+      const value = row[reportSort.key];
+      if (typeof value === 'boolean') return value ? 1 : 0;
+      if (typeof value === 'number') return value;
+      if (reportSort.key === 'last_meeting_at' || reportSort.key === 'next_meeting_at' || reportSort.key === 'reminder_sent_at') {
+        return value ? new Date(value).getTime() : -Infinity;
+      }
+      return (value || '').toString().toLowerCase();
+    };
+
+    const a = getValue(left);
+    const b = getValue(right);
+    if (a === b) return 0;
+    if (a > b) return reportSort.direction === 'asc' ? 1 : -1;
+    return reportSort.direction === 'asc' ? -1 : 1;
+  });
   const addViewer = async () => {
     if (!newViewerEmail.trim()) return;
     setViewerSaving(true);
     setViewerError('');
+    if (activeTab === 'reports') {
+      fetchClientReports();
+    }
     try {
       const res = await fetch('/api/calendar/viewers', {
         method: 'POST',
@@ -1195,6 +1302,12 @@ const AdminSettingsView = ({
             className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'bookings' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
           >
             <CalendarIcon className="w-5 h-5" /> All Bookings
+          </button>
+          <button 
+            onClick={() => setActiveTab('reports')}
+            className={cn("w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all", activeTab === 'reports' ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "text-slate-600 hover:bg-slate-100")}
+          >
+            <SettingsIcon className="w-5 h-5" /> Reports
           </button>
           <button 
             onClick={() => setActiveTab('group-meetings')}
@@ -1457,6 +1570,115 @@ const AdminSettingsView = ({
                     </div>
                   ))
                 )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'reports' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-2xl font-bold">Client Reports</h2>
+                <p className="text-sm text-slate-500 mt-1">Track meeting quality, reminder follow-up, critical notes, and which clients have gone more than three weeks without a meeting.</p>
+              </div>
+
+              <div className="flex flex-wrap gap-3 text-xs text-slate-500">
+                <span className="px-2 py-1 rounded-full bg-slate-100">Quality 4 = good flow and happy client</span>
+                <span className="px-2 py-1 rounded-full bg-amber-50 text-amber-700">Quality 1 = mentor needs manager support</span>
+                <span className="px-2 py-1 rounded-full bg-red-50 text-red-700">No meeting for 3 weeks = follow up</span>
+              </div>
+
+              {reportError && <p className="text-sm text-red-600">{reportError}</p>}
+
+              <div className="overflow-x-auto border border-slate-100 rounded-2xl">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-slate-50 text-slate-600">
+                    <tr>
+                      {[
+                        ['client_name', 'Client'],
+                        ['last_meeting_at', 'Last Meeting'],
+                        ['next_meeting_at', 'Next Meeting'],
+                        ['meeting_quality', 'Quality'],
+                        ['reminder_sent_at', 'Reminder'],
+                        ['no_booking_after_reminder', 'No Booking After Reminder'],
+                        ['no_meeting_three_weeks', 'No Meeting 3 Weeks'],
+                        ['critical_note', 'Critical Note'],
+                      ].map(([key, label]) => (
+                        <th key={key} className="text-left px-4 py-3 font-semibold whitespace-nowrap">
+                          <button className="hover:text-slate-900 transition-colors" onClick={() => toggleReportSort(key as keyof ClientReportRow)}>{label}</button>
+                        </th>
+                      ))}
+                      <th className="px-4 py-3"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedClientReports.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="text-center py-12 text-slate-400">No client report rows yet.</td>
+                      </tr>
+                    ) : sortedClientReports.map(row => (
+                      <tr key={row.client_ref} className="border-t border-slate-100 align-top">
+                        <td className="px-4 py-3 min-w-[220px]">
+                          <p className="font-semibold text-slate-900">{row.client_name || 'Unknown client'}</p>
+                          <p className="text-xs text-slate-500">{row.client_email || row.client_ref}</p>
+                          <p className="text-[11px] text-slate-400 mt-1">{row.booking_count} meetings • {row.app_booking_count} app • {row.google_booking_count} Google</p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <p className="font-medium text-slate-900">{formatReportDateTime(row.last_meeting_at)}</p>
+                          <p className="text-xs text-slate-500">{row.last_meeting_name || '—'}</p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <p className="font-medium text-slate-900">{formatReportDateTime(row.next_meeting_at)}</p>
+                          <p className="text-xs text-slate-500">{row.next_meeting_name || '—'}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <select
+                            value={row.meeting_quality ?? ''}
+                            onChange={e => updateClientReportField(row.client_ref, 'meeting_quality', e.target.value ? Number(e.target.value) : null)}
+                            className="w-28 px-2 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                          >
+                            <option value="">Unset</option>
+                            <option value="4">4 - Good flow</option>
+                            <option value="3">3 - Solid</option>
+                            <option value="2">2 - Needs work</option>
+                            <option value="1">1 - Need support</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="date"
+                            value={row.reminder_sent_at ? row.reminder_sent_at.slice(0, 10) : ''}
+                            onChange={e => updateClientReportField(row.client_ref, 'reminder_sent_at', e.target.value || null)}
+                            className="px-2 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={cn('inline-flex px-2 py-1 rounded-full text-xs font-semibold', row.no_booking_after_reminder ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-700')}>
+                            {row.no_booking_after_reminder ? 'Yes' : 'No'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={cn('inline-flex px-2 py-1 rounded-full text-xs font-semibold', row.no_meeting_three_weeks ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600')}>
+                            {row.no_meeting_three_weeks ? 'Overdue' : 'Recent'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 min-w-[260px]">
+                          <input
+                            type="text"
+                            value={row.critical_note || ''}
+                            onChange={e => updateClientReportField(row.client_ref, 'critical_note', e.target.value)}
+                            placeholder="Critical note or reminder context"
+                            className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <Button onClick={() => saveClientReport(row)} disabled={reportSavingRef === row.client_ref}>
+                            {reportSavingRef === row.client_ref ? 'Saving…' : 'Save'}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}

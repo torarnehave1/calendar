@@ -28,26 +28,60 @@ async function getCalendarToken(env, userEmail) {
   return data.access_token
 }
 
+async function fetchSelectedGoogleCalendarIds(accessToken) {
+  try {
+    const res = await fetch(
+      'https://www.googleapis.com/calendar/v3/users/me/calendarList?showHidden=false&minAccessRole=reader',
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    )
+    if (!res.ok) {
+      console.error('Google Calendar list fetch error:', await res.text())
+      return ['primary']
+    }
+    const data = await res.json()
+    const ids = (data.items || [])
+      .filter(item => item.accessRole && item.accessRole !== 'none' && item.selected !== false)
+      .map(item => item.id)
+      .filter(Boolean)
+
+    return ids.length ? ids : ['primary']
+  } catch (err) {
+    console.error('Google Calendar list fetch error:', err.message)
+    return ['primary']
+  }
+}
+
 async function fetchGoogleCalendarEvents(accessToken, timeMin, timeMax) {
   try {
-    const params = new URLSearchParams({
-      timeMin,
-      timeMax,
-      singleEvents: 'true',
-      orderBy: 'startTime',
-    })
+    const calendarIds = await fetchSelectedGoogleCalendarIds(accessToken)
     const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
+      'https://www.googleapis.com/calendar/v3/freeBusy',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          timeMin,
+          timeMax,
+          items: calendarIds.map(id => ({ id })),
+        }),
+      }
     )
     if (!res.ok) {
       console.error('Google Calendar fetch error:', await res.text())
       return []
     }
     const data = await res.json()
-    return (data.items || [])
-      .filter(e => e.start?.dateTime && e.end?.dateTime) // skip all-day events
-      .map(e => ({ start_time: e.start.dateTime, end_time: e.end.dateTime, source: 'google' }))
+    return Object.entries(data.calendars || {}).flatMap(([calendarId, calendar]) =>
+      (calendar.busy || []).map(slot => ({
+        start_time: slot.start,
+        end_time: slot.end,
+        calendar_id: calendarId,
+        source: 'google',
+      }))
+    )
   } catch (err) {
     console.error('Google Calendar fetch error:', err.message)
     return []
@@ -106,37 +140,57 @@ async function updateGoogleCalendarEvent(accessToken, eventId, updates) {
 // Returns rich event details for admin view (includes summary, attendees, gcal id)
 async function fetchGoogleCalendarEventsDetailed(accessToken, timeMin, timeMax) {
   try {
-    const params = new URLSearchParams({
-      timeMin,
-      timeMax,
-      singleEvents: 'true',
-      orderBy: 'startTime',
-      maxResults: '200',
-    })
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
+    const calendarIds = await fetchSelectedGoogleCalendarIds(accessToken)
+    const calendarResults = await Promise.all(
+      calendarIds.map(async calendarId => {
+        try {
+          const params = new URLSearchParams({
+            timeMin,
+            timeMax,
+            singleEvents: 'true',
+            orderBy: 'startTime',
+            maxResults: '200',
+          })
+          const res = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?${params}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          )
+          if (!res.ok) {
+            console.error(`Google Calendar detailed fetch error for ${calendarId}:`, await res.text())
+            return []
+          }
+          const data = await res.json()
+          return (data.items || [])
+            .filter(e => e.start?.dateTime && e.end?.dateTime)
+            .map(e => ({
+              id: null,
+              google_event_id: e.id,
+              guest_name: e.summary || '(No title)',
+              guest_email: (e.attendees || []).filter(a => !a.self).map(a => a.email).join(', '),
+              start_time: e.start.dateTime,
+              end_time: e.end.dateTime,
+              description: e.description || '',
+              location: e.location || '',
+              meeting_type_name: null,
+              meeting_type_duration: null,
+              created_at: e.created,
+              calendar_id: calendarId,
+              source: 'google',
+            }))
+        } catch (err) {
+          console.error(`Google Calendar detailed fetch error for ${calendarId}:`, err.message)
+          return []
+        }
+      })
     )
-    if (!res.ok) {
-      console.error('Google Calendar detailed fetch error:', await res.text())
-      return []
+
+    const deduped = new Map()
+    for (const event of calendarResults.flat()) {
+      const dedupeKey = `${event.google_event_id}:${event.start_time}:${event.end_time}`
+      if (!deduped.has(dedupeKey)) deduped.set(dedupeKey, event)
     }
-    const data = await res.json()
-    return (data.items || [])
-      .filter(e => e.start?.dateTime && e.end?.dateTime)
-      .map(e => ({
-        id: null,
-        google_event_id: e.id,
-        guest_name: e.summary || '(No title)',
-        guest_email: (e.attendees || []).filter(a => !a.self).map(a => a.email).join(', '),
-        start_time: e.start.dateTime,
-        end_time: e.end.dateTime,
-        description: e.description || '',
-        meeting_type_name: null,
-        meeting_type_duration: null,
-        created_at: e.created,
-        source: 'google',
-      }))
+
+    return Array.from(deduped.values())
   } catch (err) {
     console.error('Google Calendar detailed fetch error:', err.message)
     return []
@@ -262,6 +316,42 @@ async function seedUserDefaults(db, userEmail) {
       `INSERT OR IGNORE INTO meeting_types (user_email, name, duration, description, is_special) VALUES (?, ?, ?, ?, ?)`
     ).bind(userEmail, t.name, t.duration, t.description || '', t.is_special || 0).run()
   }
+}
+
+function getClientRef(booking) {
+  const email = (booking?.guest_email || '').trim().toLowerCase()
+  if (email) return email
+  const name = (booking?.guest_name || '').trim().toLowerCase()
+  if (name) return `name:${name}`
+  const googleId = (booking?.google_event_id || '').trim()
+  if (googleId) return `event:${googleId}`
+  return `unknown:${booking?.start_time || crypto.randomUUID()}`
+}
+
+async function getCombinedAdminBookings(db, env, userEmail) {
+  const result = await db.prepare(
+    `SELECT b.id, b.guest_name, b.guest_email, b.start_time, b.end_time, b.description, b.google_event_id, b.created_at,
+            mt.name as meeting_type_name, mt.duration as meeting_type_duration
+     FROM bookings b LEFT JOIN meeting_types mt ON b.meeting_type_id = mt.id
+     WHERE b.user_email = ? ORDER BY b.start_time ASC`
+  ).bind(userEmail).all()
+
+  const d1Bookings = (result.results || []).map(b => ({ ...b, source: 'app' }))
+  const syncedGoogleIds = new Set(d1Bookings.filter(b => b.google_event_id).map(b => b.google_event_id))
+
+  const accessToken = await getCalendarToken(env, userEmail)
+  let googleNativeEvents = []
+  if (accessToken) {
+    const timeMin = new Date()
+    timeMin.setDate(timeMin.getDate() - 180)
+    const timeMax = new Date()
+    timeMax.setDate(timeMax.getDate() + 90)
+    const allGoogleEvents = await fetchGoogleCalendarEventsDetailed(accessToken, timeMin.toISOString(), timeMax.toISOString())
+    googleNativeEvents = allGoogleEvents.filter(e => !syncedGoogleIds.has(e.google_event_id))
+  }
+
+  return [...d1Bookings, ...googleNativeEvents]
+    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
 }
 
 // ── Worker entry ──
@@ -1134,33 +1224,150 @@ export default {
       // ── Admin: Get bookings (D1 + Google Calendar) ──
       if (path === '/api/admin/bookings' && request.method === 'GET') {
         if (!userEmail) return json({ error: 'Unauthorized' }, 401)
-        const result = await db.prepare(
-          `SELECT b.id, b.guest_name, b.guest_email, b.start_time, b.end_time, b.description, b.google_event_id, b.created_at,
-                  mt.name as meeting_type_name, mt.duration as meeting_type_duration
-           FROM bookings b LEFT JOIN meeting_types mt ON b.meeting_type_id = mt.id
-           WHERE b.user_email = ? ORDER BY b.start_time ASC`
-        ).bind(userEmail).all()
+        const combined = await getCombinedAdminBookings(db, env, userEmail)
+        return json({ bookings: combined })
+      }
 
-        const d1Bookings = (result.results || []).map(b => ({ ...b, source: 'app' }))
-        const syncedGoogleIds = new Set(d1Bookings.filter(b => b.google_event_id).map(b => b.google_event_id))
+      if (path === '/api/admin/client-reports' && request.method === 'GET') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
 
-        // Fetch Google Calendar events: 30 days back → 60 days forward
-        const accessToken = await getCalendarToken(env, userEmail)
-        let googleNativeEvents = []
-        if (accessToken) {
-          const timeMin = new Date()
-          timeMin.setDate(timeMin.getDate() - 30)
-          const timeMax = new Date()
-          timeMax.setDate(timeMax.getDate() + 60)
-          const allGoogleEvents = await fetchGoogleCalendarEventsDetailed(accessToken, timeMin.toISOString(), timeMax.toISOString())
-          // Exclude events already tracked in D1 via google_event_id
-          googleNativeEvents = allGoogleEvents.filter(e => !syncedGoogleIds.has(e.google_event_id))
+        const [combinedBookings, metadataResult] = await Promise.all([
+          getCombinedAdminBookings(db, env, userEmail),
+          db.prepare('SELECT * FROM client_reports WHERE user_email = ?').bind(userEmail).all(),
+        ])
+
+        const metadataByRef = new Map((metadataResult.results || []).map(row => [row.client_ref, row]))
+        const reportMap = new Map()
+        const now = new Date()
+
+        for (const booking of combinedBookings) {
+          if (booking.source === 'google' && !(booking.guest_email || '').trim()) {
+            continue
+          }
+          const ref = getClientRef(booking)
+          const start = new Date(booking.start_time)
+          const existing = reportMap.get(ref) || {
+            client_ref: ref,
+            client_name: booking.guest_name || booking.guest_email || 'Unknown client',
+            client_email: booking.guest_email || '',
+            booking_count: 0,
+            app_booking_count: 0,
+            google_booking_count: 0,
+            last_meeting_at: null,
+            last_meeting_name: null,
+            next_meeting_at: null,
+            next_meeting_name: null,
+            last_source: null,
+          }
+
+          existing.client_name = existing.client_name || booking.guest_name || booking.guest_email || 'Unknown client'
+          existing.client_email = existing.client_email || booking.guest_email || ''
+          existing.booking_count += 1
+          if (booking.source === 'google') existing.google_booking_count += 1
+          else existing.app_booking_count += 1
+
+          if (!Number.isNaN(start.getTime())) {
+            if (start <= now) {
+              if (!existing.last_meeting_at || start > new Date(existing.last_meeting_at)) {
+                existing.last_meeting_at = booking.start_time
+                existing.last_meeting_name = booking.guest_name || booking.meeting_type_name || null
+                existing.last_source = booking.source || null
+              }
+            } else if (!existing.next_meeting_at || start < new Date(existing.next_meeting_at)) {
+              existing.next_meeting_at = booking.start_time
+              existing.next_meeting_name = booking.guest_name || booking.meeting_type_name || null
+            }
+          }
+
+          reportMap.set(ref, existing)
         }
 
-        const combined = [...d1Bookings, ...googleNativeEvents]
-          .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+        for (const metadata of metadataByRef.values()) {
+          if (!reportMap.has(metadata.client_ref)) {
+            reportMap.set(metadata.client_ref, {
+              client_ref: metadata.client_ref,
+              client_name: metadata.client_name || metadata.client_email || 'Unknown client',
+              client_email: metadata.client_email || '',
+              booking_count: 0,
+              app_booking_count: 0,
+              google_booking_count: 0,
+              last_meeting_at: null,
+              last_meeting_name: null,
+              next_meeting_at: null,
+              next_meeting_name: null,
+              last_source: null,
+            })
+          }
+        }
 
-        return json({ bookings: combined })
+        const rows = Array.from(reportMap.values()).map(row => {
+          const meta = metadataByRef.get(row.client_ref) || {}
+          const lastMeetingDate = row.last_meeting_at ? new Date(row.last_meeting_at) : null
+          const reminderDate = meta.reminder_sent_at ? new Date(meta.reminder_sent_at) : null
+          const noMeetingThreeWeeks = !lastMeetingDate || ((now.getTime() - lastMeetingDate.getTime()) >= (21 * 24 * 60 * 60 * 1000))
+          const noBookingAfterReminder = reminderDate
+            ? !row.next_meeting_at || new Date(row.next_meeting_at) < reminderDate
+            : false
+
+          return {
+            ...row,
+            meeting_quality: meta.meeting_quality ?? null,
+            critical_note: meta.critical_note || '',
+            reminder_sent_at: meta.reminder_sent_at || null,
+            no_meeting_three_weeks: noMeetingThreeWeeks,
+            no_booking_after_reminder: noBookingAfterReminder,
+          }
+        }).sort((a, b) => {
+          const aTime = a.last_meeting_at ? new Date(a.last_meeting_at).getTime() : 0
+          const bTime = b.last_meeting_at ? new Date(b.last_meeting_at).getTime() : 0
+          return bTime - aTime
+        })
+
+        return json({ reports: rows })
+      }
+
+      if (path === '/api/admin/client-reports' && request.method === 'POST') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const body = await request.json()
+        const clientRef = (body.client_ref || '').toString().trim()
+        const clientEmail = (body.client_email || '').toString().trim()
+        const clientName = (body.client_name || '').toString().trim()
+        const criticalNote = (body.critical_note || '').toString().trim()
+        const reminderSentAtRaw = (body.reminder_sent_at || '').toString().trim()
+        const meetingQualityRaw = body.meeting_quality
+
+        if (!clientRef) return json({ error: 'client_ref is required' }, 400)
+
+        let meetingQuality = null
+        if (meetingQualityRaw !== null && meetingQualityRaw !== undefined && meetingQualityRaw !== '') {
+          meetingQuality = Number(meetingQualityRaw)
+          if (!Number.isInteger(meetingQuality) || meetingQuality < 1 || meetingQuality > 4) {
+            return json({ error: 'meeting_quality must be an integer from 1 to 4.' }, 400)
+          }
+        }
+
+        let reminderSentAt = null
+        if (reminderSentAtRaw) {
+          const parsed = new Date(reminderSentAtRaw)
+          if (Number.isNaN(parsed.getTime())) {
+            return json({ error: 'reminder_sent_at must be a valid date.' }, 400)
+          }
+          reminderSentAt = parsed.toISOString()
+        }
+
+        await db.prepare(
+          `INSERT INTO client_reports (user_email, client_ref, client_email, client_name, meeting_quality, critical_note, reminder_sent_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(user_email, client_ref) DO UPDATE SET
+             client_email = excluded.client_email,
+             client_name = excluded.client_name,
+             meeting_quality = excluded.meeting_quality,
+             critical_note = excluded.critical_note,
+             reminder_sent_at = excluded.reminder_sent_at,
+             updated_at = datetime('now')`
+        ).bind(userEmail, clientRef, clientEmail || null, clientName || null, meetingQuality, criticalNote || null, reminderSentAt).run()
+
+        return json({ success: true })
       }
 
       // ── Admin: Update settings ──
