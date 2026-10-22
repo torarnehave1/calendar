@@ -11,3 +11,13 @@ database_id = "ebdf13a5-f969-4048-8407-b4970805a4b2"
 [[services]]
 binding = "AUTH_WORKER"
 service = "auth-worker"
+
+# Caller auth (2026-10-22): X-API-Token resolved against config. Same D1 as the other workers.
+[[d1_databases]]
+binding = "vegvisr_org"
+database_name = "vegvisr_org"
+database_id = "507d1efd-1dda-45ef-971f-52d2c8e8afe8"
+
+[vars]
+# "true" = public admin calls need X-API-Token; X-User-Email is then trusted only on service-binding calls.
+CALENDAR_ENFORCE_TOKEN = "false"

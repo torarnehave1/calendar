@@ -6,7 +6,7 @@
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-User-Email',
+  'Access-Control-Allow-Headers': 'Content-Type, X-User-Email, X-API-Token',
 }
 
 const json = (data, status = 200) =>
@@ -352,6 +352,30 @@ async function getCombinedAdminBookings(db, env, userEmail) {
 
   return [...d1Bookings, ...googleNativeEvents]
     .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+}
+
+// ── Caller identity (2026-10-22) ──
+// Until 2026-10-22 every admin route trusted X-User-Email, so anyone could read, change or delete
+// anyone's calendar data by naming them. Now the caller is:
+//  1. X-API-Token, resolved against config.emailVerificationToken (vegvisr_org D1), or
+//  2. X-User-Email on a SERVICE-BINDING call (url host "calendar-worker" — Agent-Builder, dev-worker
+//     and the Calendar app's Pages proxy, which set it only from a verified identity). A public
+//     request can never carry that host.
+//  3. X-User-Email on a public call only while CALENDAR_ENFORCE_TOKEN is not "true" (roll-out).
+async function resolveCaller(request, env, url) {
+  const token = (request.headers.get('X-API-Token') || '').trim()
+  if (token) {
+    if (!env.vegvisr_org) return null
+    const row = await env.vegvisr_org
+      .prepare('SELECT email FROM config WHERE emailVerificationToken = ? LIMIT 1')
+      .bind(token).first()
+    return row?.email || null
+  }
+  const header = request.headers.get('X-User-Email')
+  if (!header) return null
+  if (url.hostname === 'calendar-worker') return header
+  if (env.CALENDAR_ENFORCE_TOKEN !== 'true') return header
+  return null
 }
 
 // ── Worker entry ──
@@ -1114,8 +1138,8 @@ export default {
         return json({ success: true })
       }
 
-      // ── Admin: Get user email from header ──
-      const userEmail = request.headers.get('X-User-Email')
+      // ── Admin: the caller, from a token or a trusted binding (see resolveCaller) ──
+      const userEmail = await resolveCaller(request, env, url)
 
       // ── Day View: All calendars for a date range ──
       if (path === '/api/calendar/day-view' && request.method === 'GET') {
