@@ -202,9 +202,15 @@ const Input = ({ label, ...props }: React.InputHTMLAttributes<HTMLInputElement> 
   </div>
 );
 
-// Helper: build headers for admin API calls (includes X-User-Email for auth)
+// The signed-in user's token (persistUser stores it in localStorage 'user'). calendar-worker
+// takes the caller from it; X-User-Email alone is no longer trusted from a browser (2026-10-22).
+const apiToken = (): string => {
+  try { return JSON.parse(localStorage.getItem('user') || '{}').emailVerificationToken || ''; } catch { return ''; }
+};
+
+// Helper: build headers for admin API calls (token + X-User-Email)
 const adminHeaders = (email: string, contentType?: string): Record<string, string> => {
-  const h: Record<string, string> = { 'X-User-Email': email };
+  const h: Record<string, string> = { 'X-User-Email': email, 'X-API-Token': apiToken() };
   if (contentType) h['Content-Type'] = contentType;
   return h;
 };
@@ -767,7 +773,7 @@ const DayView = ({ userEmail, ownerEmail }: { userEmail: string; ownerEmail: str
     const ownerParam = ownerEmail !== userEmail ? `&owner=${encodeURIComponent(ownerEmail)}` : '';
     try {
       const res = await fetch(`/api/calendar/day-view?date=${dateStr}&days=1${ownerParam}`, {
-        headers: { 'X-User-Email': userEmail },
+        headers: adminHeaders(userEmail),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -2013,7 +2019,7 @@ export default function App() {
   // Auto-setup defaults for new user on first login
   useEffect(() => {
     if (authStatus === 'authed' && authUser?.email && !settings) {
-      fetch('/api/admin/setup', { method: 'POST', headers: { 'X-User-Email': authUser.email } })
+      fetch('/api/admin/setup', { method: 'POST', headers: adminHeaders(authUser.email) })
         .then(() => fetch(`/api/public/settings?user=${encodeURIComponent(authUser.email)}`))
         .then(r => r.json())
         .then(data => {
