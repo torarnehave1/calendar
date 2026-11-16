@@ -3,6 +3,8 @@
  * Replaces Express server.ts with Cloudflare Worker + D1
  */
 
+import { buildOwnEvent, findSameEvent, shapeOwnEvent } from './own-event.js'
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
@@ -602,6 +604,47 @@ export default {
                 },
               },
             },
+            '/api/calendar/events': {
+              post: {
+                summary: "Add one plain event to the authenticated user's own primary Google calendar (never with guests)",
+                description: 'An event with the same title starting at the same instant is returned as it is (created: false). Nothing is sent to anyone.',
+                operationId: 'createOwnCalendarEvent',
+                tags: ['Admin'],
+                parameters: [{ $ref: '#/components/parameters/XUserEmail' }],
+                requestBody: { required: true, content: { 'application/json': { schema: {
+                  type: 'object',
+                  required: ['summary', 'start'],
+                  properties: {
+                    summary: { type: 'string', description: 'Title, at most 200 characters' },
+                    start: { type: 'string', description: 'Local time in timeZone, e.g. 2026-11-19T12:00' },
+                    end: { type: 'string', description: 'Local end time. Omit to use durationMinutes.' },
+                    durationMinutes: { type: 'integer', description: '1–1440, default 60' },
+                    timeZone: { type: 'string', description: 'IANA name, default Europe/Oslo' },
+                    location: { type: 'string' },
+                    description: { type: 'string' },
+                  },
+                } } } },
+                responses: {
+                  '200': {
+                    description: 'The event, new or already there',
+                    content: { 'application/json': { schema: {
+                      type: 'object',
+                      properties: {
+                        success: { type: 'boolean' },
+                        created: { type: 'boolean' },
+                        id: { type: 'string' },
+                        summary: { type: 'string' },
+                        start: { type: 'string' },
+                        end: { type: 'string' },
+                        htmlLink: { type: 'string' },
+                      },
+                    } } },
+                  },
+                  '400': { $ref: '#/components/responses/BadRequest' },
+                  '401': { $ref: '#/components/responses/Unauthorized' },
+                },
+              },
+            },
             '/api/admin/setup': {
               post: {
                 summary: 'Seed default settings, availability, and meeting types for the authenticated user',
@@ -1142,6 +1185,46 @@ export default {
       const userEmail = await resolveCaller(request, env, url)
 
       // ── Day View: All calendars for a date range ──
+      // ── Own calendar: add one plain event (2026-11-16, VEGR Flow «Stillerom») ──
+      // The caller's OWN primary calendar, never with guests — so nothing is sent to anyone.
+      // An event with the same title at the same start is answered as it is (created: false).
+      if (path === '/api/calendar/events' && request.method === 'POST') {
+        if (!userEmail) return json({ error: 'Unauthorized' }, 401)
+        const built = buildOwnEvent(await request.json().catch(() => null))
+        if (!built.ok) return json({ success: false, error: built.error }, 400)
+
+        const accessToken = await getCalendarToken(env, userEmail)
+        if (!accessToken) return json({ success: false, error: 'Google Calendar is not connected for this account.' }, 409)
+
+        const gcal = 'https://www.googleapis.com/calendar/v3/calendars/primary/events'
+        const auth = { Authorization: `Bearer ${accessToken}` }
+        const window = new URLSearchParams({
+          timeMin: built.startInstant.toISOString(),
+          timeMax: new Date(built.startInstant.getTime() + 60_000).toISOString(),
+          singleEvents: 'true',
+          maxResults: '50',
+        })
+        const seen = await fetch(`${gcal}?${window}`, { headers: auth })
+        if (!seen.ok) {
+          console.error('Own event: could not read the calendar:', await seen.text())
+          return json({ success: false, error: `Could not read your Google calendar (status ${seen.status}), so nothing was added.` }, 502)
+        }
+        const same = findSameEvent((await seen.json()).items, built.event.summary, built.startInstant)
+        if (same) return json(shapeOwnEvent(same, false))
+
+        // sendUpdates=none: there are no guests, and this must never become a way to mail people.
+        const made = await fetch(`${gcal}?sendUpdates=none`, {
+          method: 'POST',
+          headers: { ...auth, 'Content-Type': 'application/json' },
+          body: JSON.stringify(built.event),
+        })
+        if (!made.ok) {
+          console.error('Own event: Google refused:', await made.text())
+          return json({ success: false, error: `Google Calendar did not accept the event (status ${made.status}).` }, 502)
+        }
+        return json(shapeOwnEvent(await made.json(), true))
+      }
+
       if (path === '/api/calendar/day-view' && request.method === 'GET') {
         if (!userEmail) return json({ error: 'Unauthorized' }, 401)
         // date param = YYYY-MM-DD; if omitted, use today
